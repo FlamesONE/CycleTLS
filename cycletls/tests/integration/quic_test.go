@@ -26,7 +26,7 @@ func TestQUICHttp3WithRoundTripper(t *testing.T) {
 
 	// Test HTTP/3 using JA4 fingerprint with QUIC transport
 	// This tests that JA4 fingerprints work with HTTP/3 connections
-	response, err := cycletls.Init().Do("https://cloudflare-quic.com/", cycletls.Options{
+	response, err := cycletls.Init(cycletls.WithRawBytes()).Do("https://cloudflare-quic.com/", cycletls.Options{
 		Ja3:               "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,18-65037-65281-17613-23-51-13-27-45-16-5-35-0-43-10-11,4588-29-23-24,0",
 		ForceHTTP3:         true,
 		UserAgent:          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -81,7 +81,7 @@ func TestQUICHttp3WithoutFingerprint(t *testing.T) {
 	}
 
 	// Test HTTP/3 without QUIC fingerprint to verify it still works
-	client := cycletls.Init()
+	client := cycletls.Init(cycletls.WithRawBytes())
 	resp, err := client.Do("https://cloudflare-quic.com/", cycletls.Options{
 		ForceHTTP3:         true,
 		UserAgent:          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",

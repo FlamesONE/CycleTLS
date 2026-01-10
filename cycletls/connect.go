@@ -44,6 +44,7 @@ type connectDialer struct {
 	DialTLS func(network string, address string) (net.Conn, string, error)
 
 	EnableH2ConnReuse  bool
+	InsecureSkipVerify bool // respect user's TLS verification setting for proxy connections
 	cacheH2Mu          sync.Mutex
 	cachedH2ClientConn *http2.ClientConn
 	cachedH2RawConn    net.Conn
@@ -52,7 +53,7 @@ type connectDialer struct {
 // newConnectDialer creates a dialer to issue CONNECT requests and tunnel traffic via HTTP/S proxy.
 // proxyUrlStr must provide Scheme and Host, may provide credentials and port.
 // Example: https://username:password@golang.org:443
-func newConnectDialer(proxyURLStr string, UserAgent string) (proxy.ContextDialer, error) {
+func newConnectDialer(proxyURLStr string, UserAgent string, insecureSkipVerify bool) (proxy.ContextDialer, error) {
 	proxyURL, err := url.Parse(proxyURLStr)
 	if err != nil {
 		return nil, err
@@ -64,9 +65,10 @@ func newConnectDialer(proxyURLStr string, UserAgent string) (proxy.ContextDialer
 	}
 
 	client := &connectDialer{
-		ProxyURL:          *proxyURL,
-		DefaultHeader:     make(http.Header),
-		EnableH2ConnReuse: true,
+		ProxyURL:           *proxyURL,
+		DefaultHeader:      make(http.Header),
+		EnableH2ConnReuse:  true,
+		InsecureSkipVerify: insecureSkipVerify,
 	}
 
 	switch proxyURL.Scheme {
@@ -247,7 +249,7 @@ func (c *connectDialer) DialContext(ctx context.Context, network, address string
 			tlsConf := tls.Config{
 				NextProtos:         []string{"h2", "http/1.1"},
 				ServerName:         c.ProxyURL.Hostname(),
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: c.InsecureSkipVerify,
 			}
 			tlsConn, err := tls.Dial(network, c.ProxyURL.Host, &tlsConf)
 			if err != nil {

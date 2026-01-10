@@ -2,8 +2,8 @@ package cycletls
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
+	"hash/fnv"
 	fhttp "github.com/Danny-Dasilva/fhttp"
 	"sync"
 	"time"
@@ -12,12 +12,6 @@ import (
 	uquic "github.com/refraction-networking/uquic"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
-)
-
-// Global client pool for connection reuse
-var (
-	clientPool      = make(map[string]fhttp.Client)
-	clientPoolMutex = sync.RWMutex{}
 )
 
 // ClientPoolEntry represents a cached client with metadata
@@ -181,9 +175,10 @@ func generateClientKey(browser Browser, timeout int, disableRedirect bool, proxy
 		cookieStr,
 	)
 
-	// Generate SHA256 hash for the key
-	hash := sha256.Sum256([]byte(configStr))
-	return fmt.Sprintf("%x", hash[:16]) // Use first 16 bytes for shorter key
+	// Generate FNV-1a hash for the key (faster than SHA256 for cache keys)
+	h := fnv.New64a()
+	h.Write([]byte(configStr))
+	return fmt.Sprintf("%x", h.Sum64())
 }
 
 // getOrCreateClient retrieves a client from the pool or creates a new one
@@ -243,7 +238,7 @@ func createNewClient(browser Browser, timeout int, disableRedirect bool, userAge
 	var dialer proxy.ContextDialer
 	if len(proxyURL) > 0 && len(proxyURL[0]) > 0 {
 		var err error
-		dialer, err = newConnectDialer(proxyURL[0], userAgent)
+		dialer, err = newConnectDialer(proxyURL[0], userAgent, browser.InsecureSkipVerify)
 		if err != nil {
 			return fhttp.Client{
 				Timeout:       time.Duration(timeout) * time.Second,

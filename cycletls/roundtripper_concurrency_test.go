@@ -1,8 +1,11 @@
+//go:build !integration
+
 package cycletls
 
 import (
 	"net"
 	"testing"
+	"time"
 
 	http "github.com/Danny-Dasilva/fhttp"
 )
@@ -31,8 +34,15 @@ func TestGetTransport_NoPanicWhenCachedConnPresent(t *testing.T) {
 	// Simulate a previously established (cached) TLS connection and transport
 	c1, _ := net.Pipe()
 	defer c1.Close()
-	rt.cachedConnections[addr] = c1
-	rt.cachedTransports[addr] = &http.Transport{}
+	now := time.Now()
+	rt.cachedConnections[addr] = &cachedConn{
+		conn:     c1,
+		lastUsed: now,
+	}
+	rt.cachedTransports[addr] = &cachedTransport{
+		transport: &http.Transport{},
+		lastUsed:  now,
+	}
 
 	// Ensure no panic
 	defer func() {

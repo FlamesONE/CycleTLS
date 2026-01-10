@@ -11,22 +11,25 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [16.x]
-        go-version: ['1.21']
+        node-version: [20.x]
+        go-version: ['1.24']
         platform: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
       - name: 🟢 Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           registry-url: "https://registry.npmjs.org"
+          cache: 'npm'
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+          cache: true
+          cache-dependency-path: ./cycletls/go.sum
 
       - name: Install npm depencencies
         run: npm ci

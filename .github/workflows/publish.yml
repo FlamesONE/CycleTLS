@@ -13,21 +13,24 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [16.x]
-        go-version: ['1.21']
+        node-version: [20.x]
+        go-version: ['1.24']
     steps:
       - uses: actions/checkout@v4
       - name: 🟢 Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           registry-url: "https://registry.npmjs.org"
-
+          cache: 'npm'
           token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+          cache: true
+          cache-dependency-path: ./cycletls/go.sum
       - name: Export Go
         run: go env -w  GO111MODULE=auto
         working-directory: ./
@@ -72,15 +75,18 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
+        with:
+          cache: true
+          cache-dependency-path: ./cycletls/go.sum
       -
         name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v3
+        uses: goreleaser/goreleaser-action@v6
         with:
           # either 'goreleaser' (default) or 'goreleaser-pro'
           distribution: goreleaser

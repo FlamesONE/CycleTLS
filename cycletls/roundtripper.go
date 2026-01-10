@@ -21,6 +21,33 @@ import (
 
 var errProtocolNegotiated = errors.New("protocol negotiated")
 
+// Cache configuration constants
+const (
+	maxCachedConnections = 100
+	maxCachedTransports  = 100
+	cacheCleanupInterval = 5 * time.Minute
+	connectionMaxAge     = 10 * time.Minute
+)
+
+// cachedConn wraps a net.Conn with LRU tracking
+type cachedConn struct {
+	conn     net.Conn
+	lastUsed time.Time
+}
+
+// cachedTransport wraps an http.RoundTripper with LRU tracking
+type cachedTransport struct {
+	transport http.RoundTripper
+	lastUsed  time.Time
+}
+
+// cachedHTTP3Transport wraps an http3.Transport with LRU tracking and connection info
+type cachedHTTP3Transport struct {
+	transport *http3.Transport
+	conn      *HTTP3Connection // Keep reference for cleanup
+	lastUsed  time.Time
+}
+
 type roundTripper struct {
 	sync.Mutex
 
@@ -51,9 +78,13 @@ type roundTripper struct {
 	// TLS 1.3 specific options
 	TLS13AutoRetry bool
 
-	// Caching
-	cachedConnections map[string]net.Conn
-	cachedTransports  map[string]http.RoundTripper
+	// Caching with LRU eviction
+	cachedConnections     map[string]*cachedConn
+	cachedTransports      map[string]*cachedTransport
+	cachedHTTP3Transports map[string]*cachedHTTP3Transport
+	cacheMu               sync.RWMutex
+	cleanupOnce           sync.Once
+	cleanupStop           chan struct{}
 
 	dialer proxy.ContextDialer
 }
@@ -92,6 +123,12 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Get address for dialing
 	addr := rt.getDialTLSAddr(req)
 
+	// Start cleanup goroutine on first use (needed for both HTTP/2 and HTTP/3)
+	rt.cleanupOnce.Do(func() {
+		rt.cleanupStop = make(chan struct{})
+		go rt.startCacheCleanup()
+	})
+
 	// Check if we need HTTP/3 - matches reference implementation pattern
 	if rt.ForceHTTP3 {
 		// Extract host and port from request
@@ -101,6 +138,23 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 			port = "443" // Default HTTPS port
 		}
 
+		// Create cache key for HTTP/3 transport (use h3: prefix to distinguish from HTTP/2)
+		http3CacheKey := "h3:" + net.JoinHostPort(host, port)
+
+		// Check for cached HTTP/3 transport
+		rt.cacheMu.RLock()
+		cachedH3, hasCached := rt.cachedHTTP3Transports[http3CacheKey]
+		rt.cacheMu.RUnlock()
+
+		if hasCached {
+			// Update last used time and use cached transport
+			rt.cacheMu.Lock()
+			cachedH3.lastUsed = time.Now()
+			rt.cacheMu.Unlock()
+			return rt.makeHTTP3RequestWithTransport(req, cachedH3.transport)
+		}
+
+		// No cached transport, need to create new connection
 		// Check for USpec (matches reference implementation logic)
 		if rt.USpec != nil {
 			// Use UQuic-based HTTP/3 dialing
@@ -108,26 +162,8 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 			if err != nil {
 				return nil, fmt.Errorf("uhttp3 dial failed: %w", err)
 			}
-			defer func() {
-				if conn.RawConn != nil {
-					conn.RawConn.Close()
-				}
-				// Close the QUIC connection based on its type
-				if conn.QuicConn != nil {
-					if conn.IsUQuic {
-						if uquicConn, ok := conn.QuicConn.(interface{ CloseWithError(uint64, string) error }); ok {
-							uquicConn.CloseWithError(0, "request completed")
-						}
-					} else {
-						if quicConn, ok := conn.QuicConn.(interface{ CloseWithError(uint64, string) error }); ok {
-							quicConn.CloseWithError(0, "request completed")
-						}
-					}
-				}
-			}()
-
-			// Use the HTTP/3 connection to make the request
-			return rt.makeHTTP3Request(req, conn)
+			// Connection will be cached by makeHTTP3Request, cleanup handled by LRU
+			return rt.makeHTTP3Request(req, conn, http3CacheKey)
 		}
 
 		// Fall back to standard HTTP/3 dialing
@@ -135,46 +171,45 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ghttp3 dial failed: %w", err)
 		}
-		defer func() {
-			if conn.RawConn != nil {
-				conn.RawConn.Close()
-			}
-			// Close the QUIC connection based on its type
-			if conn.QuicConn != nil {
-				if conn.IsUQuic {
-					if uquicConn, ok := conn.QuicConn.(interface{ CloseWithError(uint64, string) error }); ok {
-						uquicConn.CloseWithError(0, "request completed")
-					}
-				} else {
-					if quicConn, ok := conn.QuicConn.(interface{ CloseWithError(uint64, string) error }); ok {
-						quicConn.CloseWithError(0, "request completed")
-					}
-				}
-			}
-		}()
-
-		// Use the HTTP/3 connection to make the request
-		return rt.makeHTTP3Request(req, conn)
+		// Connection will be cached by makeHTTP3Request, cleanup handled by LRU
+		return rt.makeHTTP3Request(req, conn, http3CacheKey)
 	}
 
 	// Use cached transport if available, otherwise create a new one
-	if _, ok := rt.cachedTransports[addr]; !ok {
+	rt.cacheMu.RLock()
+	ct, ok := rt.cachedTransports[addr]
+	rt.cacheMu.RUnlock()
+
+	if !ok {
 		if err := rt.getTransport(req, addr); err != nil {
 			return nil, err
 		}
+		rt.cacheMu.RLock()
+		ct = rt.cachedTransports[addr]
+		rt.cacheMu.RUnlock()
+	} else {
+		// Update last used time
+		rt.cacheMu.Lock()
+		ct.lastUsed = time.Now()
+		rt.cacheMu.Unlock()
 	}
 
 	// Perform the request
-	return rt.cachedTransports[addr].RoundTrip(req)
+	return ct.transport.RoundTrip(req)
 }
 
 func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http":
 		// Allow connection reuse by removing DisableKeepAlives
-		rt.cachedTransports[addr] = &http.Transport{
-			DialContext: rt.dialer.DialContext,
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http.Transport{
+				DialContext: rt.dialer.DialContext,
+			},
+			lastUsed: time.Now(),
 		}
+		rt.cacheMu.Unlock()
 		return nil
 	case "https":
 	default:
@@ -187,7 +222,10 @@ func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
 	defer addressMutex.Unlock()
 
 	// Double-check if transport was created while we were waiting for the lock
-	if _, exists := rt.cachedTransports[addr]; exists {
+	rt.cacheMu.RLock()
+	_, exists := rt.cachedTransports[addr]
+	rt.cacheMu.RUnlock()
+	if exists {
 		// Another goroutine already created the transport
 		return nil
 	}
@@ -214,9 +252,16 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 	defer rt.Unlock()
 
 	// Return cached connection if available
-	if conn := rt.cachedConnections[addr]; conn != nil {
-		return conn, nil
+	rt.cacheMu.RLock()
+	if cc := rt.cachedConnections[addr]; cc != nil {
+		rt.cacheMu.RUnlock()
+		// Update last used time
+		rt.cacheMu.Lock()
+		cc.lastUsed = time.Now()
+		rt.cacheMu.Unlock()
+		return cc.conn, nil
 	}
+	rt.cacheMu.RUnlock()
 
 	// Establish raw connection
 	rawConn, err := rt.dialer.DialContext(ctx, network, addr)
@@ -306,11 +351,15 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 	}
 
 	// If transport already exists, return connection
-	if rt.cachedTransports[addr] != nil {
+	rt.cacheMu.RLock()
+	existingTransport := rt.cachedTransports[addr]
+	rt.cacheMu.RUnlock()
+	if existingTransport != nil {
 		return conn, nil
 	}
 
 	// Create appropriate transport based on negotiated protocol
+	now := time.Now()
 	switch conn.ConnectionState().NegotiatedProtocol {
 	case http2.NextProtoTLS:
 		// HTTP/2 transport
@@ -341,17 +390,35 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 			}
 		}
 
-		rt.cachedTransports[addr] = &http2Transport
-	default:
-		// HTTP/1.x transport - configure to avoid idle channel errors
-		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext:    rt.dialTLS,
-			DisableKeepAlives: true, // Disable keep-alives to prevent idle channel errors
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http2Transport,
+			lastUsed:  now,
 		}
+		rt.cacheMu.Unlock()
+	default:
+		// HTTP/1.x transport - enable keep-alives with proper idle timeout settings
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http.Transport{
+				DialTLSContext:      rt.dialTLS,
+				DisableKeepAlives:   false,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+			},
+			lastUsed: now,
+		}
+		rt.cacheMu.Unlock()
 	}
 
 	// Cache the connection for future use
-	rt.cachedConnections[addr] = conn
+	rt.cacheMu.Lock()
+	rt.cachedConnections[addr] = &cachedConn{
+		conn:     conn,
+		lastUsed: now,
+	}
+	rt.cacheMu.Unlock()
 
 	return nil, errProtocolNegotiated
 }
@@ -412,6 +479,7 @@ func (rt *roundTripper) retryWithTLS13CompatibleCurves(ctx context.Context, netw
 	}
 
 	// Create appropriate transport based on negotiated protocol
+	now := time.Now()
 	switch conn.ConnectionState().NegotiatedProtocol {
 	case http2.NextProtoTLS:
 		// HTTP/2 transport
@@ -439,17 +507,35 @@ func (rt *roundTripper) retryWithTLS13CompatibleCurves(ctx context.Context, netw
 			}
 		}
 
-		rt.cachedTransports[addr] = &http2Transport
-	default:
-		// HTTP/1.x transport
-		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext:    rt.dialTLS,
-			DisableKeepAlives: true,
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http2Transport,
+			lastUsed:  now,
 		}
+		rt.cacheMu.Unlock()
+	default:
+		// HTTP/1.x transport - enable keep-alives with proper idle timeout settings
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http.Transport{
+				DialTLSContext:      rt.dialTLS,
+				DisableKeepAlives:   false,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+			},
+			lastUsed: now,
+		}
+		rt.cacheMu.Unlock()
 	}
 
 	// Cache the successful TLS 1.3 connection
-	rt.cachedConnections[addr] = conn
+	rt.cacheMu.Lock()
+	rt.cachedConnections[addr] = &cachedConn{
+		conn:     conn,
+		lastUsed: now,
+	}
+	rt.cacheMu.Unlock()
 
 	return nil, errProtocolNegotiated
 }
@@ -487,6 +573,7 @@ func (rt *roundTripper) retryWithOriginalTLS12JA3(ctx context.Context, network, 
 	}
 
 	// Create appropriate transport based on negotiated protocol
+	now := time.Now()
 	switch conn.ConnectionState().NegotiatedProtocol {
 	case http2.NextProtoTLS:
 		// HTTP/2 transport
@@ -514,17 +601,35 @@ func (rt *roundTripper) retryWithOriginalTLS12JA3(ctx context.Context, network, 
 			}
 		}
 
-		rt.cachedTransports[addr] = &http2Transport
-	default:
-		// HTTP/1.x transport
-		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext:    rt.dialTLS,
-			DisableKeepAlives: true,
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http2Transport,
+			lastUsed:  now,
 		}
+		rt.cacheMu.Unlock()
+	default:
+		// HTTP/1.x transport - enable keep-alives with proper idle timeout settings
+		rt.cacheMu.Lock()
+		rt.cachedTransports[addr] = &cachedTransport{
+			transport: &http.Transport{
+				DialTLSContext:      rt.dialTLS,
+				DisableKeepAlives:   false,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+			},
+			lastUsed: now,
+		}
+		rt.cacheMu.Unlock()
 	}
 
 	// Cache the successful TLS 1.2 fallback connection
-	rt.cachedConnections[addr] = conn
+	rt.cacheMu.Lock()
+	rt.cachedConnections[addr] = &cachedConn{
+		conn:     conn,
+		lastUsed: now,
+	}
+	rt.cacheMu.Unlock()
 
 	return nil, errProtocolNegotiated
 }
@@ -565,22 +670,193 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 	rt.Lock()
 	defer rt.Unlock()
 
+	rt.cacheMu.Lock()
+	defer rt.cacheMu.Unlock()
+
 	// If we have a specific address to keep, only close other connections
 	if len(selectedAddr) > 0 && selectedAddr[0] != "" {
 		addr := selectedAddr[0]
 		// Keep the connection for the provided address, close others
-		for connAddr, conn := range rt.cachedConnections {
+		for connAddr, cc := range rt.cachedConnections {
 			if connAddr != addr {
-				_ = conn.Close()
+				if cc != nil && cc.conn != nil {
+					// Ignore errors from closing - connection might already be closed
+					_ = cc.conn.Close()
+				}
 				delete(rt.cachedConnections, connAddr)
+				// Also clean up the transport cache for this address
+				delete(rt.cachedTransports, connAddr)
+			}
+		}
+		// Also handle HTTP/3 transports (with h3: prefix)
+		h3Addr := "h3:" + addr
+		for h3Key, h3t := range rt.cachedHTTP3Transports {
+			if h3Key != h3Addr {
+				if h3t.transport != nil {
+					_ = h3t.transport.Close()
+				}
+				if h3t.conn != nil {
+					rt.closeHTTP3Connection(h3t.conn)
+				}
+				delete(rt.cachedHTTP3Transports, h3Key)
 			}
 		}
 	} else {
 		// No address specified, close all connections (original behavior)
-		for addr, conn := range rt.cachedConnections {
-			_ = conn.Close()
+		for addr, cc := range rt.cachedConnections {
+			if cc != nil && cc.conn != nil {
+				// Ignore errors from closing - connection might already be closed
+				_ = cc.conn.Close()
+			}
 			delete(rt.cachedConnections, addr)
+			// Also clean up the transport cache for this address
+			delete(rt.cachedTransports, addr)
 		}
+		// Close all HTTP/3 transports
+		for key, h3t := range rt.cachedHTTP3Transports {
+			if h3t.transport != nil {
+				_ = h3t.transport.Close()
+			}
+			if h3t.conn != nil {
+				rt.closeHTTP3Connection(h3t.conn)
+			}
+			delete(rt.cachedHTTP3Transports, key)
+		}
+	}
+}
+
+// startCacheCleanup runs the periodic cache cleanup goroutine
+func (rt *roundTripper) startCacheCleanup() {
+	ticker := time.NewTicker(cacheCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			rt.cleanupCache()
+		case <-rt.cleanupStop:
+			return
+		}
+	}
+}
+
+// cleanupCache removes expired entries and enforces LRU eviction
+func (rt *roundTripper) cleanupCache() {
+	rt.cacheMu.Lock()
+	defer rt.cacheMu.Unlock()
+
+	now := time.Now()
+
+	// Clean old connections
+	for key, cc := range rt.cachedConnections {
+		if now.Sub(cc.lastUsed) > connectionMaxAge {
+			if cc.conn != nil {
+				_ = cc.conn.Close()
+			}
+			delete(rt.cachedConnections, key)
+		}
+	}
+
+	// Clean old transports
+	for key, ct := range rt.cachedTransports {
+		if now.Sub(ct.lastUsed) > connectionMaxAge {
+			delete(rt.cachedTransports, key)
+		}
+	}
+
+	// Clean old HTTP/3 transports
+	for key, h3t := range rt.cachedHTTP3Transports {
+		if now.Sub(h3t.lastUsed) > connectionMaxAge {
+			// Close the HTTP/3 transport
+			if h3t.transport != nil {
+				_ = h3t.transport.Close()
+			}
+			// Close the underlying QUIC connection
+			if h3t.conn != nil {
+				rt.closeHTTP3Connection(h3t.conn)
+			}
+			delete(rt.cachedHTTP3Transports, key)
+		}
+	}
+
+	// If still over limit, remove oldest connections
+	for len(rt.cachedConnections) > maxCachedConnections {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rt.cachedConnections {
+			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastUsed
+			}
+		}
+		if oldestKey != "" {
+			if cc := rt.cachedConnections[oldestKey]; cc != nil && cc.conn != nil {
+				_ = cc.conn.Close()
+			}
+			delete(rt.cachedConnections, oldestKey)
+		}
+	}
+
+	// If still over limit, remove oldest transports
+	for len(rt.cachedTransports) > maxCachedTransports {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rt.cachedTransports {
+			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastUsed
+			}
+		}
+		if oldestKey != "" {
+			delete(rt.cachedTransports, oldestKey)
+		}
+	}
+
+	// If still over limit, remove oldest HTTP/3 transports
+	for len(rt.cachedHTTP3Transports) > maxCachedTransports {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range rt.cachedHTTP3Transports {
+			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastUsed
+			}
+		}
+		if oldestKey != "" {
+			h3t := rt.cachedHTTP3Transports[oldestKey]
+			if h3t.transport != nil {
+				_ = h3t.transport.Close()
+			}
+			if h3t.conn != nil {
+				rt.closeHTTP3Connection(h3t.conn)
+			}
+			delete(rt.cachedHTTP3Transports, oldestKey)
+		}
+	}
+}
+
+// closeHTTP3Connection closes an HTTP/3 connection properly
+func (rt *roundTripper) closeHTTP3Connection(conn *HTTP3Connection) {
+	if conn.RawConn != nil {
+		_ = conn.RawConn.Close()
+	}
+	if conn.QuicConn != nil {
+		if conn.IsUQuic {
+			if uquicConn, ok := conn.QuicConn.(interface{ CloseWithError(uint64, string) error }); ok {
+				_ = uquicConn.CloseWithError(0, "connection closed")
+			}
+		} else {
+			if quicConn, ok := conn.QuicConn.(interface{ CloseWithError(uint64, string) error }); ok {
+				_ = quicConn.CloseWithError(0, "connection closed")
+			}
+		}
+	}
+}
+
+// StopCacheCleanup stops the cache cleanup goroutine
+func (rt *roundTripper) StopCacheCleanup() {
+	if rt.cleanupStop != nil {
+		close(rt.cleanupStop)
 	}
 }
 
@@ -593,31 +869,32 @@ func newRoundTripper(browser Browser, dialer ...proxy.ContextDialer) http.RoundT
 	}
 
 	return &roundTripper{
-		dialer:             contextDialer,
-		JA3:                browser.JA3,
-		JA4r:               browser.JA4r,
-		HTTP2Fingerprint:   browser.HTTP2Fingerprint,
-		QUICFingerprint:    browser.QUICFingerprint,
-		USpec:              browser.USpec, // Add USpec field initialization
-		DisableGrease:      browser.DisableGrease,
-		UserAgent:          browser.UserAgent,
-		HeaderOrder:        browser.HeaderOrder,
-		TLSConfig:          browser.TLSConfig,
-		ServerName:         browser.ServerName,
-		Cookies:            browser.Cookies,
-		cachedTransports:   make(map[string]http.RoundTripper),
-		cachedConnections:  make(map[string]net.Conn),
-		InsecureSkipVerify: browser.InsecureSkipVerify,
-		ForceHTTP1:         browser.ForceHTTP1,
-		ForceHTTP3:         browser.ForceHTTP3,
+		dialer:                contextDialer,
+		JA3:                   browser.JA3,
+		JA4r:                  browser.JA4r,
+		HTTP2Fingerprint:      browser.HTTP2Fingerprint,
+		QUICFingerprint:       browser.QUICFingerprint,
+		USpec:                 browser.USpec, // Add USpec field initialization
+		DisableGrease:         browser.DisableGrease,
+		UserAgent:             browser.UserAgent,
+		HeaderOrder:           browser.HeaderOrder,
+		TLSConfig:             browser.TLSConfig,
+		ServerName:            browser.ServerName,
+		Cookies:               browser.Cookies,
+		cachedTransports:      make(map[string]*cachedTransport),
+		cachedConnections:     make(map[string]*cachedConn),
+		cachedHTTP3Transports: make(map[string]*cachedHTTP3Transport),
+		InsecureSkipVerify:    browser.InsecureSkipVerify,
+		ForceHTTP1:            browser.ForceHTTP1,
+		ForceHTTP3:            browser.ForceHTTP3,
 
 		// TLS 1.3 specific options
 		TLS13AutoRetry: browser.TLS13AutoRetry,
 	}
 }
 
-// makeHTTP3Request performs an HTTP/3 request using the provided HTTP/3 connection
-func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connection) (*http.Response, error) {
+// makeHTTP3Request performs an HTTP/3 request and caches the transport for reuse
+func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connection, cacheKey string) (*http.Response, error) {
 	// Create HTTP/3 RoundTripper with custom dial function that uses our established connection
 	tlsConfig := ConvertUtlsConfig(rt.TLSConfig)
 	if tlsConfig == nil {
@@ -628,8 +905,8 @@ func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connectio
 		tlsConfig.ServerName = rt.ServerName
 	}
 
-	// Create HTTP/3 Transport - let it establish its own connections for now
-	roundTripper := &http3.Transport{
+	// Create HTTP/3 Transport with connection pooling enabled
+	h3Transport := &http3.Transport{
 		TLSClientConfig: tlsConfig,
 		QUICConfig: &quic.Config{
 			HandshakeIdleTimeout:           30 * time.Second,
@@ -647,6 +924,21 @@ func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connectio
 		},
 	}
 
+	// Cache the HTTP/3 transport for future requests
+	rt.cacheMu.Lock()
+	rt.cachedHTTP3Transports[cacheKey] = &cachedHTTP3Transport{
+		transport: h3Transport,
+		conn:      conn,
+		lastUsed:  time.Now(),
+	}
+	rt.cacheMu.Unlock()
+
+	// Use the transport to make the request
+	return rt.makeHTTP3RequestWithTransport(req, h3Transport)
+}
+
+// makeHTTP3RequestWithTransport performs an HTTP/3 request using a cached transport
+func (rt *roundTripper) makeHTTP3RequestWithTransport(req *http.Request, h3Transport *http3.Transport) (*http.Response, error) {
 	// Convert fhttp.Request to net/http.Request
 	stdReq := &stdhttp.Request{
 		Method:           req.Method,
@@ -673,7 +965,7 @@ func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connectio
 	}
 
 	// Use the RoundTripper to make the request
-	stdResp, err := roundTripper.RoundTrip(stdReq)
+	stdResp, err := h3Transport.RoundTrip(stdReq)
 	if err != nil {
 		return nil, err
 	}
