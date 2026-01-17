@@ -4,11 +4,10 @@
 ## 2.0.6 - (11-3-2025)
 
 ### New Features
-- **Modern Streaming Protocol (Default)** - Credit-based flow control for memory-efficient large file downloads
-  - `new CycleTLS()` is now the default export - streaming with backpressure
+- **Modern Streaming Protocol** - Credit-based flow control for memory-efficient large file downloads
+  - `new CycleTLS()` is now the only API - streaming with backpressure
   - Binary protocol with credit-based flow control - server blocks until client signals capacity
   - One WebSocket per request model for cleaner resource management
-  - `Legacy()` export available for backward compatibility with buffered responses
   - Go: Added `flow_control.go` with `creditWindow` semaphore (context-aware blocking)
   - Go: Added `packet_builder.go` and `packet_reader.go` for binary frame encoding/decoding
   - Go: Added `ws_handler_v2.go` with errgroup-based request handling
@@ -16,18 +15,18 @@
   - 26 new unit tests for flow control and protocol components
   - See [FLOW_CONTROL.md](./FLOW_CONTROL.md) for detailed documentation
 
-### API Changes
-- **New Default Export** - `import CycleTLS from 'cycletls'` now returns the modern streaming client
+### Breaking Changes
+- **New API** - `import CycleTLS from 'cycletls'` returns a class-based streaming client
   - Before: `const cycleTLS = await initCycleTLS()` (buffered response)
   - After: `const client = new CycleTLS()` (streaming response)
-- **Legacy API Available** - `import { Legacy } from 'cycletls'` provides the original buffered API
-  - `const cycleTLS = await Legacy()` works exactly like the old `initCycleTLS()`
-- **Renamed Types**:
-  - `FlowControlClient` → `CycleTLS`
-  - `FlowControlOptions` → `CycleTLSOptions`
-  - `FlowControlRequestOptions` → `RequestOptions`
-  - `FlowControlResponse` → `Response`
-  - `FlowControlError` → `CycleTLSError`
+  - Response body is now a stream - use `for await (const chunk of response.body)`
+- **Removed Legacy API** - The old `initCycleTLS()` / `Legacy()` export has been removed
+- **New Types**:
+  - `CycleTLS` - Main client class
+  - `CycleTLSOptions` - Client configuration
+  - `RequestOptions` - Per-request options
+  - `Response` - Streaming response
+  - `CycleTLSError` - Error class
 
 ### Bug Fixes
 - **Connection Reuse Race Condition** - Fixed critical panic when using `enableConnectionReuse: true` with concurrent requests across multiple instances [#407](https://github.com/Danny-Dasilva/CycleTLS/issues/407)
@@ -39,11 +38,8 @@
   - Go: Enhanced `CloseIdleConnections` method with nil checks and synchronized cleanup of connection and transport caches
   - Performance: Connection reuse now provides 2-3x improvement for repeated requests (first: ~800ms, subsequent: ~350ms)
   - Added comprehensive test coverage: `test_issue_407.js` (Node.js) and `issue_407_connection_reuse_test.go` (Go integration tests with 50 concurrent request stress test)
-  - Zero breaking changes for Legacy API - all existing code works without modification
 
 ### Enhancements
-- **Streaming as Default** - Modern streaming protocol is now the default for memory efficiency
-  - `Legacy()` available for existing users who prefer buffered responses
 - Improved error handling and logging for WebSocket channel operations
 - Enhanced concurrency safety with proper mutex usage throughout request dispatchers
 - Request-level failure isolation - single request failures no longer crash entire process

@@ -1862,7 +1862,7 @@ const initCycleTLS = async (
   }
 };
 
-// V2 Modern CycleTLS (streaming with backpressure)
+// CycleTLS exports (streaming with backpressure)
 export {
   CycleTLS,
   CycleTLSOptions,
@@ -1873,10 +1873,7 @@ export {
 export { CreditManager } from "./credit-manager";
 export * as Protocol from "./protocol";
 
-// Legacy V1 client (buffered, multiplexed)
-export { initCycleTLS as Legacy };
-
-// Default export: Modern CycleTLS (V2)
+// Default export: CycleTLS
 import CycleTLS from "./flow-control-client";
 export default CycleTLS;
 
@@ -1886,6 +1883,5 @@ export { CycleTLSWebSocket };
 module.exports = CycleTLS;
 module.exports.default = CycleTLS;
 module.exports.CycleTLS = CycleTLS;
-module.exports.Legacy = initCycleTLS;
 module.exports.CycleTLSWebSocket = CycleTLSWebSocket;
 module.exports.__esModule = true;

@@ -175,58 +175,58 @@ The modern protocol uses a length-prefixed binary format:
 [4B: payload.length][JSON: {statusCode, message}]
 ```
 
-## Backward Compatibility
+## Migrating from v2.0.5
 
-### For Existing Users
+The API has changed significantly in v2.0.6. Here's how to migrate:
 
-The legacy API is available via the `Legacy` export:
+### Before (v2.0.5 - Buffered)
 
 ```typescript
-import { Legacy } from 'cycletls';
+import initCycleTLS from 'cycletls';
 
-const cycleTLS = await Legacy();
-const response = await cycleTLS('https://example.com', {});
-// Works exactly as before - internally uses ?v=1 legacy protocol
+const cycleTLS = await initCycleTLS();
+const response = await cycleTLS('https://example.com/large-file.zip', {
+  ja3: '771,4865-4867-4866-49195...',
+  userAgent: 'Mozilla/5.0...',
+});
+
+// Entire body buffered in memory - may OOM on large files!
+console.log(response.body);
+await cycleTLS.exit();
 ```
 
-### Migrating from Legacy
-
-If you're downloading large files or experiencing memory issues:
+### After (v2.0.6 - Streaming)
 
 ```typescript
-// Before (Legacy - may OOM on large files)
-import { Legacy } from 'cycletls';
-const cycleTLS = await Legacy();
-const response = await cycleTLS('https://example.com/huge.zip', {});
-const body = response.body; // Entire body buffered in memory!
-
-// After (Modern - bounded memory)
 import CycleTLS from 'cycletls';
+
 const client = new CycleTLS();
-const response = await client.request({ url: 'https://example.com/huge.zip' });
+const response = await client.request({
+  url: 'https://example.com/large-file.zip',
+  ja3: '771,4865-4867-4866-49195...',
+  userAgent: 'Mozilla/5.0...',
+});
+
+// Stream chunks - memory stays bounded
 for await (const chunk of response.body) {
-  // Process chunks as they arrive
-  // Memory stays bounded regardless of file size
+  process(chunk);
 }
+await client.close();
 ```
+
+### Key Migration Points
+
+| Aspect | v2.0.5 (Old) | v2.0.6 (New) |
+|--------|--------------|--------------|
+| Import | `import initCycleTLS from 'cycletls'` | `import CycleTLS from 'cycletls'` |
+| Initialize | `await initCycleTLS()` | `new CycleTLS()` |
+| Request | `cycleTLS(url, options)` | `client.request({ url, ...options })` |
+| Response body | `response.body` (string) | `response.body` (stream) |
+| Cleanup | `cycleTLS.exit()` | `client.close()` |
+| Memory | Unbounded (entire response) | Bounded (credit window) |
 
 ## Architecture
 
-### Legacy
-```
-TypeScript Legacy()
-    │
-    ├── WebSocket (multiplexed)
-    │       │
-    │       ▼
-    │   Go Server (readSocket)
-    │       │
-    │       ├── goroutine per request
-    │       │
-    │       └── chanWrite (shared channel)
-```
-
-### Modern (CycleTLS)
 ```
 TypeScript new CycleTLS()
     │

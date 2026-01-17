@@ -5,7 +5,7 @@
  * that provides memory-efficient large file downloads.
  */
 
-import CycleTLS, { Legacy } from "../dist/index.js";
+import CycleTLS from "../dist/index.js";
 
 jest.setTimeout(60000);
 
@@ -313,40 +313,5 @@ describe("CycleTLS (V2 Protocol)", () => {
         // drain
       }
     });
-  });
-});
-
-describe("CycleTLS vs Legacy Comparison", () => {
-  it("both protocols should return same data for simple requests", async () => {
-    // V2 Modern CycleTLS
-    const v2Client = new CycleTLS({ port: 9119, autoSpawn: true });
-
-    // V1 Legacy
-    const v1Client = await Legacy();
-
-    try {
-      // Make same request with both
-      const [v2Response, v1Response] = await Promise.all([
-        v2Client.get("https://httpbin.org/json"),
-        v1Client("https://httpbin.org/json", {}),
-      ]);
-
-      // V2 response
-      const v2Chunks: Buffer[] = [];
-      for await (const chunk of v2Response.body) {
-        v2Chunks.push(chunk);
-      }
-      const v2Body = JSON.parse(Buffer.concat(v2Chunks).toString("utf8"));
-
-      // V1 response (body is a string on the response object)
-      const v1Body = JSON.parse(v1Response.body as string);
-
-      // Both should have same data structure
-      expect(v2Response.statusCode).toBe(v1Response.status);
-      expect(v2Body.slideshow).toEqual(v1Body.slideshow);
-    } finally {
-      await v2Client.close();
-      await v1Client.exit();
-    }
   });
 });

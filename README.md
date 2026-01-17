@@ -398,36 +398,33 @@ for await (const chunk of response.body) {
 await client.close();
 ```
 
-### Legacy API
+### Migrating from v2.0.5
 
-The original buffered API is available via the `Legacy` export for backward compatibility:
+If you're upgrading from v2.0.5 or earlier, the API has changed:
 
 ```typescript
-import { Legacy } from 'cycletls';
-
-// Initialize legacy client (V1 protocol)
-const cycleTLS = await Legacy();
-
-// Standard request (entire body buffered in memory)
-const response = await cycleTLS('https://example.com/api', {
-  ja3: '771,4865-4867-4866-49195...',
-  userAgent: 'Mozilla/5.0...',
-});
-
-console.log(response.body);
+// OLD (v2.0.5 and earlier) - no longer available
+import initCycleTLS from 'cycletls';
+const cycleTLS = await initCycleTLS();
+const response = await cycleTLS('https://example.com', { ja3: '...' });
+console.log(response.body); // Entire body buffered as string
 await cycleTLS.exit();
+
+// NEW (v2.0.6+) - streaming with backpressure
+import CycleTLS from 'cycletls';
+const client = new CycleTLS();
+const response = await client.get('https://example.com', { ja3: '...' });
+for await (const chunk of response.body) {
+  console.log(chunk.toString()); // Stream chunks as they arrive
+}
+await client.close();
 ```
 
-### When to use which API?
-
-| Use Case | Recommended | Why |
-|----------|-------------|-----|
-| Large file downloads | `new CycleTLS()` | Memory-efficient streaming |
-| Streaming responses | `new CycleTLS()` | Backpressure prevents OOM |
-| Memory-constrained environments | `new CycleTLS()` | Bounded memory usage |
-| API requests (small responses) | `Legacy()` | Simpler API, body buffered |
-| Existing code migration | `Legacy()` | No code changes needed |
-| Multiple concurrent requests | `Legacy()` | Multiplexed single connection |
+**Key differences:**
+- `new CycleTLS()` instead of `await initCycleTLS()`
+- Response body is a stream, not a buffered string
+- Use `client.get()`, `client.post()`, or `client.request()` methods
+- Memory stays bounded regardless of response size
 
 ### CycleTLS Options
 
