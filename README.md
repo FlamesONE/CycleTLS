@@ -101,12 +101,8 @@ const CycleTLS = require('cycletls').default;
     proxy: 'http://username:password@hostname.com:443'
   });
 
-  // Collect response body and parse as JSON
-  const chunks = [];
-  for await (const chunk of response.body) {
-    chunks.push(chunk);
-  }
-  const data = JSON.parse(Buffer.concat(chunks).toString());
+  // Parse response using built-in helper methods
+  const data = await response.json();
   console.log(data);
 
   // Cleanly close CycleTLS
@@ -134,12 +130,8 @@ const CycleTLS = require('cycletls').default;
     ja4r: 't13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601'
   });
 
-  // Consume streaming body
-  const chunks = [];
-  for await (const chunk of response.body) {
-    chunks.push(chunk);
-  }
-  const data = JSON.parse(Buffer.concat(chunks).toString());
+  // Parse response using built-in helper
+  const data = await response.json();
   console.log('JA4:', data.tls.ja4);
   console.log('JA4_r:', data.tls.ja4_r);
   console.log('TLS Version:', data.tls.tls_version_negotiated);
@@ -595,10 +587,27 @@ import CycleTLS from 'cycletls';
 // Create client
 const client = new CycleTLS(options?: CycleTLSOptions);
 
-// Methods
+// HTTP Methods
 client.request(options: RequestOptions): Promise<Response>
 client.get(url: string, options?: RequestOptions): Promise<Response>
-client.post(url: string, body: string, options?: RequestOptions): Promise<Response>
+client.post(url: string, body?: string, options?: RequestOptions): Promise<Response>
+client.put(url: string, body?: string, options?: RequestOptions): Promise<Response>
+client.delete(url: string, options?: RequestOptions): Promise<Response>
+client.patch(url: string, body?: string, options?: RequestOptions): Promise<Response>
+client.head(url: string, options?: RequestOptions): Promise<Response>
+client.options(url: string, options?: RequestOptions): Promise<Response>
+client.trace(url: string, options?: RequestOptions): Promise<Response>
+client.connect(url: string, options?: RequestOptions): Promise<Response>
+
+// WebSocket (returns event-emitter matching 'ws' library API)
+client.ws(url: string, options?: RequestOptions): Promise<CycleTLSWebSocket>
+client.webSocket(url: string, options?: RequestOptions): Promise<CycleTLSWebSocket>
+
+// Server-Sent Events (returns async iterator for events)
+client.sse(url: string, options?: RequestOptions): Promise<SSEResponse>
+client.eventSource(url: string, options?: RequestOptions): Promise<SSEResponse>
+
+// Cleanup
 client.close(): Promise<void>
 ```
 
@@ -631,13 +640,18 @@ client.close(): Promise<void>
 | `forceHTTP3` | boolean | Force HTTP/3 |
 
 **Response:**
-| Property | Type | Description |
-|----------|------|-------------|
+| Property/Method | Type | Description |
+|-----------------|------|-------------|
 | `requestId` | string | Unique request identifier |
 | `statusCode` | number | HTTP status code |
 | `finalUrl` | string | Final URL after redirects |
 | `headers` | Record<string, string[]> | Response headers |
 | `body` | Readable | Streaming response body |
+| `json<T>()` | Promise<T> | Parse body as JSON |
+| `text()` | Promise<string> | Get body as text |
+| `buffer()` | Promise<Buffer> | Get body as Buffer |
+| `arrayBuffer()` | Promise<ArrayBuffer> | Get body as ArrayBuffer |
+| `blob()` | Promise<Blob> | Get body as Blob |
 
 #### 2. Legacy API - Named Export
 
@@ -798,12 +812,14 @@ client := &http.Client{Transport: transport}
 |---------|---------------------------|----------------------------|
 | Import | `import CycleTLS from 'cycletls'` | `import { initCycleTLS } from 'cycletls'` |
 | Init | `new CycleTLS()` | `await initCycleTLS()` |
-| Response body | Stream (`Readable`) | Buffered (`string`) |
+| Response body | Stream (`Readable`) + helpers | Buffered (`string`) |
 | Status property | `statusCode` | `status` |
-| Memory usage | Bounded | Unbounded for large files |
+| Memory usage | Bounded (backpressure) | Unbounded for large files |
 | Cleanup | `client.close()` | `cycleTLS.exit()` |
-| WebSocket | Not yet | `cycleTLS.ws()` |
-| SSE | Not yet | `cycleTLS.sse()` |
+| WebSocket | ✅ `client.ws()` (EventEmitter API) | `cycleTLS.ws()` |
+| SSE | ✅ `client.sse()` (async iterator) | `cycleTLS.sse()` |
+| HTTP Methods | All 9 methods | All 9 methods |
+| Response helpers | `.json()`, `.text()`, `.buffer()` | `.json()`, `.text()` |
 
 ## CycleTLS Request Config
 
@@ -1071,12 +1087,6 @@ CycleTLS supports multiple proxy protocols for routing requests through intermed
 const CycleTLS = require('cycletls').default;
 // TypeScript: import CycleTLS from 'cycletls';
 
-// Helper to consume response body as JSON
-async function consumeJSON(body) {
-  const chunks = [];
-  for await (const chunk of body) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString());
-}
 
 (async () => {
   const client = new CycleTLS();
@@ -1195,21 +1205,75 @@ if response.Status == 502 {
 
 ## CycleTLS Response Schema
 
-```js
-{
+```typescript
+interface Response {
+  // Unique request identifier (String)
+  requestId: string;
   // Status code returned from server (Number)
-  status: 200,
-  // Body returned from the server (String)
-  body: "",
+  statusCode: number;
+  // Final URL after redirects (String)
+  finalUrl: string;
   // Headers returned from the server (Object)
-  headers: {
-	"some": "header",
-	...
-  },
-  // FinalUrl returned from the server (String). This field is useful when redirection is active.
-  finalUrl: "https://final.url/"	
-}
+  headers: Record<string, string[]>;
+  // Body as a readable stream (for large responses)
+  body: Readable;
 
+  // Helper methods (buffer entire response)
+  json<T>(): Promise<T>;       // Parse as JSON
+  text(): Promise<string>;     // Get as text
+  buffer(): Promise<Buffer>;   // Get as Buffer
+  arrayBuffer(): Promise<ArrayBuffer>;
+  blob(): Promise<Blob>;
+}
+```
+
+### Response Helper Methods
+
+The response includes convenient methods for parsing the body:
+
+```js
+const CycleTLS = require('cycletls').default;
+
+(async () => {
+  const client = new CycleTLS();
+
+  const response = await client.get('https://api.example.com/data');
+
+  // Parse as JSON (most common)
+  const data = await response.json();
+
+  // Get as text
+  const text = await response.text();
+
+  // Get as Buffer (for binary data)
+  const buffer = await response.buffer();
+
+  // Access response metadata
+  console.log('Status:', response.statusCode);
+  console.log('Final URL:', response.finalUrl);
+  console.log('Headers:', response.headers);
+
+  await client.close();
+})();
+```
+
+### Streaming Large Responses
+
+For large files, use the stream directly to avoid buffering:
+
+```js
+const fs = require('fs');
+
+const response = await client.get('https://example.com/large-file.zip');
+
+// Pipe to file without loading into memory
+const writeStream = fs.createWriteStream('download.zip');
+response.body.pipe(writeStream);
+
+// Or process chunks manually
+for await (const chunk of response.body) {
+  process(chunk);
+}
 ```
 
 
@@ -1229,12 +1293,6 @@ const CycleTLS = require('cycletls').default;
 const ja3 = "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0";
 const userAgent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0";
 
-// Helper to consume response body as JSON
-async function consumeJSON(body) {
-  const chunks = [];
-  for await (const chunk of body) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString());
-}
 
 // Defining multiple requests
 const requestDict = {
@@ -2279,21 +2337,19 @@ func main() {
 
 <details>
 
-CycleTLS provides a WebSocket client that supports custom TLS fingerprinting.
+CycleTLS provides a full-featured WebSocket client with TLS fingerprinting support. The API matches the popular `ws` library.
 
-### JavaScript WebSocket Example
-
-> **Note:** WebSocket support is available through the legacy API (`initCycleTLS`). The streaming API does not yet support WebSocket connections.
+### JavaScript WebSocket Example (Streaming API)
 
 ```js
-const { initCycleTLS } = require('cycletls');
-// TypeScript: import { initCycleTLS } from 'cycletls';
+const CycleTLS = require('cycletls').default;
+// TypeScript: import CycleTLS from 'cycletls';
 
 (async () => {
-  const cycleTLS = await initCycleTLS();
+  const client = new CycleTLS();
 
-  // WebSocket connection with TLS fingerprinting
-  const wsResponse = await cycleTLS.ws('wss://echo.websocket.org', {
+  // Connect to WebSocket with TLS fingerprinting
+  const ws = await client.ws('wss://echo.websocket.org', {
     ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
     userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
     headers: {
@@ -2301,14 +2357,65 @@ const { initCycleTLS } = require('cycletls');
     }
   });
 
-  // Check connection status
-  if (wsResponse.status === 101) {
-    console.log('WebSocket upgrade successful');
-    console.log('Response headers:', wsResponse.headers);
-  }
+  // Handle connection open
+  ws.on('open', () => {
+    console.log('WebSocket connected!');
+    console.log('Protocol:', ws.protocol);
+    console.log('Extensions:', ws.extensions);
+    ws.send('Hello, WebSocket!');
+  });
 
-  await cycleTLS.exit();
+  // Handle incoming messages
+  ws.on('message', (data, isBinary) => {
+    console.log('Received:', data.toString());
+  });
+
+  // Handle connection close
+  ws.on('close', (code, reason) => {
+    console.log('Closed:', code, reason);
+    client.close();
+  });
+
+  // Handle errors
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+  });
+
+  // Send messages (text or binary)
+  ws.send('text message');
+  ws.send(Buffer.from([0x01, 0x02, 0x03]), { binary: true });
+
+  // Close connection gracefully
+  ws.close(1000, 'Normal closure');
 })();
+```
+
+### WebSocket Properties and Methods
+
+```typescript
+interface CycleTLSWebSocket {
+  // Properties
+  url: string;                              // WebSocket URL
+  readyState: number;                       // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+  protocol: string;                         // Negotiated subprotocol
+  extensions: string;                       // Negotiated extensions
+  binaryType: 'nodebuffer' | 'arraybuffer'; // Binary data format
+
+  // Methods
+  send(data: string | Buffer | ArrayBuffer, options?: { binary?: boolean }, callback?: (err?: Error) => void): void;
+  close(code?: number, reason?: string): void;
+  ping(data?: Buffer | string, mask?: boolean, callback?: (err?: Error) => void): void;
+  pong(data?: Buffer | string, mask?: boolean, callback?: (err?: Error) => void): void;
+  terminate(): void;  // Immediate close without handshake
+
+  // Events
+  on('open', () => void): void;
+  on('message', (data: Buffer, isBinary: boolean) => void): void;
+  on('close', (code: number, reason: string) => void): void;
+  on('error', (err: Error) => void): void;
+  on('ping', (data: Buffer) => void): void;
+  on('pong', (data: Buffer) => void): void;
+}
 ```
 
 ### Golang WebSocket Example
@@ -2421,40 +2528,70 @@ func main() {
 
 <details>
 
-CycleTLS supports Server-Sent Events for real-time data streaming from servers.
+CycleTLS provides first-class SSE support with async iteration for real-time event processing.
 
-### JavaScript SSE Example
-
-> **Note:** SSE support is available through the legacy API (`initCycleTLS`). The streaming API does not yet support dedicated SSE connections.
+### JavaScript SSE Example (Streaming API)
 
 ```js
-const { initCycleTLS } = require('cycletls');
-// TypeScript: import { initCycleTLS } from 'cycletls';
+const CycleTLS = require('cycletls').default;
+// TypeScript: import CycleTLS from 'cycletls';
 
 (async () => {
-  const cycleTLS = await initCycleTLS();
+  const client = new CycleTLS();
 
-  // SSE connection with TLS fingerprinting
-  const sseResponse = await cycleTLS.sse('https://example.com/events', {
+  // Connect to SSE endpoint with TLS fingerprinting
+  const sse = await client.sse('https://example.com/events', {
     ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
-    userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
-    headers: {
-      'Accept': 'text/event-stream',
-      'Cache-Control': 'no-cache'
-    }
+    userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0'
   });
 
-  // Parse real-time events
-  const eventData = await sseResponse.text();
-  console.log('SSE events:', eventData);
+  // Option 1: Async iteration (recommended)
+  for await (const event of sse.events()) {
+    console.log('Event ID:', event.id);
+    console.log('Event Type:', event.event);
+    console.log('Event Data:', event.data);
 
-  await cycleTLS.exit();
+    if (event.event === 'done') {
+      break;
+    }
+  }
+
+  // Option 2: Callback-based
+  sse.onEvent((event) => {
+    console.log('Received:', event.event, event.data);
+  });
+
+  sse.onError((err) => {
+    console.error('SSE error:', err);
+  });
+
+  // Close the connection
+  await sse.close();
+  await client.close();
 })();
 ```
 
-### JavaScript SSE with Streaming API
+### SSE Response Interface
 
-You can use the streaming API to process SSE events in real-time:
+```typescript
+interface SSEEvent {
+  id?: string;      // Event ID (for resuming)
+  event?: string;   // Event type (default: 'message')
+  data: string;     // Event payload
+  retry?: number;   // Reconnection time (ms)
+}
+
+interface SSEResponse extends Response {
+  events(): AsyncIterableIterator<SSEEvent>;
+  onEvent(callback: (event: SSEEvent) => void): void;
+  onError(callback: (error: Error) => void): void;
+  close(): Promise<void>;
+}
+```
+
+### JavaScript SSE with Raw Streaming
+
+You can also use the streaming API to process SSE events manually:
 
 ```js
 const CycleTLS = require('cycletls').default;
@@ -2738,41 +2875,39 @@ Notes:
 
 WebSocket (wss) with custom SNI:
 
-> **Note:** WebSocket support requires the legacy API (`initCycleTLS`).
-
 ```ts
-import { initCycleTLS } from 'cycletls';
+import CycleTLS from 'cycletls';
 
 (async () => {
-  const cycleTLS = await initCycleTLS();
-  const ws = await cycleTLS.ws('wss://127.0.0.1:8443/socket', {
+  const client = new CycleTLS();
+  const ws = await client.ws('wss://127.0.0.1:8443/socket', {
     serverName: 'front.example',
     headers: { Host: 'real.example' },
     insecureSkipVerify: true,
   });
-  ws.onMessage(msg => console.log('message:', msg));
-  await ws.close();
-  await cycleTLS.exit();
+  ws.on('message', (data) => console.log('message:', data.toString()));
+  ws.on('close', () => client.close());
+  ws.close();
 })();
 ```
 
 SSE with custom SNI:
 
-> **Note:** SSE support requires the legacy API (`initCycleTLS`).
-
 ```ts
-import { initCycleTLS } from 'cycletls';
+import CycleTLS from 'cycletls';
 
 (async () => {
-  const cycleTLS = await initCycleTLS();
-  const sse = await cycleTLS.sse('https://127.0.0.1:8443/events', {
+  const client = new CycleTLS();
+  const sse = await client.sse('https://127.0.0.1:8443/events', {
     serverName: 'front.example',
     headers: { Host: 'real.example' },
     insecureSkipVerify: true,
   });
-  sse.onEvent(ev => console.log('event:', ev));
+  for await (const event of sse.events()) {
+    console.log('event:', event.data);
+  }
   await sse.close();
-  await cycleTLS.exit();
+  await client.close();
 })();
 ```
 
