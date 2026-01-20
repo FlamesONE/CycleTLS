@@ -4,7 +4,10 @@
 package tlsfingerprint_test
 
 import (
+	"net/url"
 	"testing"
+
+	cycletls "github.com/Danny-Dasilva/CycleTLS/cycletls"
 )
 
 func TestRedirect(t *testing.T) {
@@ -34,9 +37,20 @@ func TestRedirectTo(t *testing.T) {
 	client := newClient()
 	defer client.Close()
 
-	opts := getDefaultOptions()
-	// Redirect to an internal URL so we get a JSON response with TLS fingerprint
-	resp, err := client.Do(TestServerURL+"/redirect-to?url="+TestServerURL+"/get", opts, "GET")
+	// Use custom options for this test to ensure fresh connection (not reusing from TestRedirect)
+	// The combination of Timeout + EnableConnectionReuse=false ensures:
+	// 1. A unique client key (due to different timeout from default)
+	// 2. Fresh connection each time (no stale HTTP/2 streams from previous tests)
+	opts := cycletls.Options{
+		Ja3:                   defaultJA3,
+		UserAgent:             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		Timeout:               30,    // Increased timeout for CI environments
+		EnableConnectionReuse: false, // Disable connection reuse for test isolation
+	}
+
+	// URL-encode the redirect target to ensure proper handling
+	redirectTarget := url.QueryEscape(TestServerURL + "/get")
+	resp, err := client.Do(TestServerURL+"/redirect-to?url="+redirectTarget, opts, "GET")
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
