@@ -3,8 +3,8 @@ package cycletls
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	fhttp "github.com/Danny-Dasilva/fhttp"
+	"hash/fnv"
 	"sync"
 	"time"
 

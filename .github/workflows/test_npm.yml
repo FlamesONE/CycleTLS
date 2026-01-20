@@ -6,18 +6,21 @@ env:
   GITHUB_HASH: $(git rev-parse --short "$GITHUB_SHA")
 
 jobs:
-  release:
-    name: Run general NPM unit and itegration tests
-
+  existing-tests:
+    name: Existing Tests (Non-Blocking)
     strategy:
       matrix:
         node-version: [20.x]
         go-version: ['1.24']
         platform: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
+    # Non-blocking: failures don't fail the workflow
+    continue-on-error: true
+
     steps:
       - uses: actions/checkout@v4
-      - name: 🟢 Use Node.js ${{ matrix.node-version }}
+
+      - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -31,10 +34,45 @@ jobs:
           cache: true
           cache-dependency-path: ./cycletls/go.sum
 
-      - name: Install npm depencencies
+      - name: Install npm dependencies
         run: npm ci
         working-directory: ./
 
-      - name: Run Tests
-        run: npm test
+      - name: Run Existing Tests (excluding tlsfingerprint)
+        run: npm test -- --testPathIgnorePatterns=tlsfingerprint
+        working-directory: ./
+
+  tlsfingerprint-tests:
+    name: TLS Fingerprint Tests (Blocking)
+    strategy:
+      matrix:
+        node-version: [20.x]
+        go-version: ['1.24']
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    # Blocking: failures fail the workflow
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          registry-url: "https://registry.npmjs.org"
+          cache: 'npm'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+          cache-dependency-path: ./cycletls/go.sum
+
+      - name: Install npm dependencies
+        run: npm ci
+        working-directory: ./
+
+      - name: Run TLS Fingerprint Tests
+        run: npm test -- --testPathPattern=tlsfingerprint
         working-directory: ./

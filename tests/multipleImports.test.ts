@@ -1,4 +1,4 @@
-import initCycleTLS from "../dist/index.js";
+import { initCycleTLS } from "../dist/index.js";
 import { createSafeCycleTLS, cleanupCycleTLS } from "./test-utils.js";
 
 jest.setTimeout(30000);

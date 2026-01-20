@@ -52,8 +52,8 @@ type roundTripper struct {
 	sync.Mutex
 
 	// Per-address mutexes for preventing concurrent transport creation
-	addressMutexes    map[string]*sync.Mutex
-	addressMutexLock  sync.Mutex
+	addressMutexes   map[string]*sync.Mutex
+	addressMutexLock sync.Mutex
 
 	// TLS fingerprinting options
 	JA3              string
@@ -517,15 +517,15 @@ func (rt *roundTripper) getDialTLSAddr(req *http.Request) string {
 func (rt *roundTripper) getAddressMutex(addr string) *sync.Mutex {
 	rt.addressMutexLock.Lock()
 	defer rt.addressMutexLock.Unlock()
-	
+
 	if rt.addressMutexes == nil {
 		rt.addressMutexes = make(map[string]*sync.Mutex)
 	}
-	
+
 	if mu, exists := rt.addressMutexes[addr]; exists {
 		return mu
 	}
-	
+
 	mu := &sync.Mutex{}
 	rt.addressMutexes[addr] = mu
 	return mu

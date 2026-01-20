@@ -1,4 +1,5 @@
-import initCycleTLS, { CycleTLSClient } from "../dist/index.js";
+import { initCycleTLS, CycleTLSClient } from "../dist/index.js";
+import { Readable } from "stream";
 
 // Track all active instances for emergency cleanup
 const activeInstances = new Set<CycleTLSClient>();
@@ -8,6 +9,33 @@ export interface CycleTLSOptions {
   timeout?: number;
   debug?: boolean;
   [key: string]: any;
+}
+
+/**
+ * Helper to consume a Readable stream into a Buffer
+ */
+export async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Helper to consume a Readable stream into a string
+ */
+export async function streamToText(stream: Readable): Promise<string> {
+  const buffer = await streamToBuffer(stream);
+  return buffer.toString("utf8");
+}
+
+/**
+ * Helper to consume a Readable stream and parse as JSON
+ */
+export async function streamToJson<T = unknown>(stream: Readable): Promise<T> {
+  const text = await streamToText(stream);
+  return JSON.parse(text) as T;
 }
 
 /**
@@ -21,7 +49,7 @@ export interface CycleTLSOptions {
  * @example
  * test("Should handle timeout", async () => {
  *   await withCycleTLS(9117, async (cycleTLS) => {
- *     const response = await cycleTLS('https://example.com');
+ *     const response = await cycleTLS('https://example.com', {});
  *     expect(response.status).toBe(200);
  *   });
  * });

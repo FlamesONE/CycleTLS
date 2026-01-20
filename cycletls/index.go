@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	http "github.com/Danny-Dasilva/fhttp"
 	"github.com/Danny-Dasilva/CycleTLS/cycletls/state"
+	http "github.com/Danny-Dasilva/fhttp"
 	"github.com/gorilla/websocket"
 	utls "github.com/refraction-networking/utls"
 )
@@ -63,6 +63,7 @@ func (scw *safeChannelWriter) setClosed() {
 	defer scw.mu.Unlock()
 	scw.closed = true
 }
+
 // Type definitions moved to types.go
 
 // Backward-compatible aliases to state package
@@ -80,19 +81,19 @@ func putBuffer(buf *bytes.Buffer) {
 
 // WebSocket connection management
 type WebSocketConnection struct {
-	Conn         *websocket.Conn
-	RequestID    string
-	URL          string
-	ReadyState   int // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
-	mu           sync.RWMutex
-	writeMu      sync.Mutex // for thread-safe writes to WebSocket connection
-	commandChan  chan WebSocketCommand
-	closeChan    chan struct{}
-	done         chan struct{}  // signals all goroutines to exit
-	wg           sync.WaitGroup // tracks goroutine completion for clean shutdown
-	chanWrite    *safeChannelWriter
-	protocol     string // Negotiated subprotocol
-	extensions   string // Negotiated extensions
+	Conn        *websocket.Conn
+	RequestID   string
+	URL         string
+	ReadyState  int // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+	mu          sync.RWMutex
+	writeMu     sync.Mutex // for thread-safe writes to WebSocket connection
+	commandChan chan WebSocketCommand
+	closeChan   chan struct{}
+	done        chan struct{}  // signals all goroutines to exit
+	wg          sync.WaitGroup // tracks goroutine completion for clean shutdown
+	chanWrite   *safeChannelWriter
+	protocol    string // Negotiated subprotocol
+	extensions  string // Negotiated extensions
 }
 
 // safeWrite performs a thread-safe write to the WebSocket connection.
@@ -105,10 +106,10 @@ func (ws *WebSocketConnection) safeWrite(conn *websocket.Conn, messageType int, 
 }
 
 type WebSocketCommand struct {
-	Type       string // "send", "close", "ping", "pong"
-	Data       []byte
-	IsBinary   bool
-	CloseCode  int
+	Type        string // "send", "close", "ping", "pong"
+	Data        []byte
+	IsBinary    bool
+	CloseCode   int
 	CloseReason string
 }
 
@@ -485,6 +486,8 @@ func dispatchWebSocketRequest(request cycleTLSRequest) (result fullRequest) {
 		client:   http.Client{}, // Empty client as WebSocket uses its own dialer
 		options:  request,
 		wsClient: wsClient,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 

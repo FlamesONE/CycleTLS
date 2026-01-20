@@ -358,21 +358,16 @@ response, err := client.Do("https://tls.peet.ws/api/all", cycletls.Options{
 | Firefox 141 | `t13d1717h2_5b57614c22b0_f2748d6cd58d` |
 | Chrome 138 | `t13d1517h2_8daaf6152771_7e51fdad25f2` |
 
-### ⚠️ BREAKING CHANGES ⚠️
+### Breaking Changes
 
-```
-🚨🚨🚨 CRITICAL BREAKING CHANGES 🚨🚨🚨
+**JavaScript/TypeScript code requires updates.**
 
-Your JavaScript/TypeScript code WILL BREAK if you don't update it!
-Do NOT upgrade to v2.0.0 without reading the migration guide below.
-
-❌ response.body is REMOVED
-✅ Use response.json(), response.text(), etc. instead
-```
+- `response.body` removed
+- Use `response.json()`, `response.text()`, etc. instead
 
 ---
 
-#### 🚨 CRITICAL CHANGES (WILL BREAK YOUR CODE)
+#### Required Changes
 
 | Change Type | Old (v1.x) | New (v2.0.0) | Status |
 |-------------|------------|--------------|--------|
@@ -382,24 +377,24 @@ Do NOT upgrade to v2.0.0 without reading the migration guide below.
 
 ---
 
-#### 📋 DETAILED BREAKING CHANGES
+#### Detailed Breaking Changes
 
-**1. ⚠️ Response Body Access (CRITICAL)**
+**1. Response Body Access**
 - Direct `response.body` access **REMOVED**
 - Must use: `response.json()`, `response.text()`, `response.arrayBuffer()`, or `response.blob()` methods
 - Impact: **ALL existing code that accesses response.body will break**
 
-**2. ⚠️ Form Data Headers (RECOMMENDED)**
+**2. Form Data Headers**
 - Manual `Content-Type: multipart/form-data` headers **DEPRECATED**
 - Must use: `formData.getHeaders()` instead
 - Impact: **Form uploads may fail without proper boundary headers**
 
-**3. ⚠️ Async Response Methods (BEHAVIORAL CHANGE)**
+**3. Async Response Methods**
 - All response data access is now asynchronous and returns Promises
 - Must use `await` or `.then()` with response methods
 - Impact: **Synchronous response handling will not work**
 
-**4. ✨ NEW API Methods (ADDITIONS - NON-BREAKING)**
+**4. New API Methods (non-breaking)**
 - Added `cycleTLS.ws()`, `cycleTLS.webSocket()` for WebSocket connections
 - Added `cycleTLS.sse()`, `cycleTLS.eventSource()` for Server-Sent Events
 - Added HTTP method shortcuts: `cycleTLS.get()`, `cycleTLS.post()`, etc.
@@ -407,9 +402,9 @@ Do NOT upgrade to v2.0.0 without reading the migration guide below.
 
 ---
 
-### 🔄 Quick Migration Examples
+### Migration Examples
 
-#### ⚠️ JavaScript/TypeScript: Response Handling (BREAKING)
+#### JavaScript/TypeScript: Response Handling
 ```javascript
 // ❌ OLD (v1.x)
 const response = await cycleTLS(url, options);
@@ -421,9 +416,9 @@ const data = await response.json(); // or .text(), .arrayBuffer(), .blob()
 console.log(data);
 ```
 
-#### ✨ New Features - WebSocket & SSE
+#### New Features - WebSocket & SSE
 
-##### WebSocket Implementation
+##### WebSocket
 ```javascript
 // JavaScript/TypeScript - WebSocket connection
 const wsResponse = await cycleTLS.ws('wss://echo.websocket.org', {
@@ -462,7 +457,7 @@ if err != nil {
 }
 ```
 
-##### Server-Sent Events Implementation
+##### Server-Sent Events
 ```javascript
 // JavaScript/TypeScript - SSE connection
 const sseResponse = await cycleTLS.sse('https://example.com/events', {
@@ -504,8 +499,8 @@ for scanner.Scan() {
 }
 ```
 
-##### Connection Reuse Performance Enhancement
-Connection reuse significantly reduces TLS handshake overhead by maintaining persistent connections to the same host:
+##### Connection Reuse
+Connection reuse reduces TLS handshake overhead through persistent connections:
 
 ```javascript
 // JavaScript/TypeScript - Automatic connection reuse
@@ -576,24 +571,20 @@ sseClient := cycletls.NewSSEClient(httpClient, headers)
 
 ---
 
-### 🔄 MIGRATION GUIDE (v1.x → v2.0.0)
+### Migration Guide (v1.x to v2.0.0)
 
-```
-🛠️ STEP-BY-STEP MIGRATION CHECKLIST
+**Required changes:**
 
-□ 1. Update all response.body references
-□ 2. Fix form data headers
-□ 3. Add error handling for async methods
-□ 4. (Optional) Use new API features
-```
-
-**⚠️ REQUIRED CHANGES - Your code will break without these updates:**
+1. Update all `response.body` references
+2. Fix form data headers
+3. Add error handling for async methods
+4. (Optional) Use new API features
 
 ---
 
-#### ⚠️ STEP 1: Update Response Handling (REQUIRED)
+#### Step 1: Update Response Handling
 
-**🚨 CRITICAL: This change affects ALL existing code**
+This change affects all existing code.
 
 ```javascript
 // ❌ OLD (v1.x) - THIS WILL NO LONGER WORK
@@ -620,7 +611,7 @@ const blob = await response.blob();
 console.log(blob);
 ```
 
-**📝 Quick Fix Pattern:**
+**Quick fix:**
 ```javascript
 // Find and replace in your codebase:
 // OLD: response.body
@@ -630,9 +621,9 @@ console.log(blob);
 
 ---
 
-#### ⚠️ STEP 2: Update Form Data Headers (STRONGLY RECOMMENDED)
+#### Step 2: Update Form Data Headers
 
-**🔧 ISSUE: Manual Content-Type headers break multipart boundaries**
+Manual Content-Type headers break multipart boundaries.
 
 ```javascript
 // ❌ OLD (v1.x) - WILL CAUSE UPLOAD FAILURES
@@ -657,14 +648,13 @@ const response = await cycleTLS(url, {
 const result = await response.json(); // ✅ Parse response too!
 ```
 
-**📝 Why This Matters:**
-Multipart form data requires unique boundaries. Manual headers miss this critical detail.
+Multipart form data requires unique boundaries. Manual headers miss this detail.
 
 ---
 
-#### ⚠️ STEP 3: Add Error Handling (RECOMMENDED)
+#### Step 3: Add Error Handling
 
-**🛡️ PROTECTION: Response parsing can now fail**
+Response parsing can fail.
 
 ```javascript
 // ✅ ROBUST ERROR HANDLING
@@ -689,31 +679,29 @@ try {
 }
 ```
 
-**🔍 Common Errors to Handle:**
+Common errors:
 - **JSON parsing errors**: Server returned non-JSON data
 - **Network errors**: Connection failed
 - **HTTP errors**: 4xx/5xx status codes
 
 ---
 
-#### ✨ STEP 4: Explore New Features (OPTIONAL)
-
-**🎉 BONUS: Take advantage of new capabilities**
+#### Step 4: Explore New Features (Optional)
 
 ```javascript
-// ✨ HTTP METHOD SHORTCUTS (cleaner code)
+// HTTP method shortcuts
 const getResponse = await cycleTLS.get(url, options);
 const postResponse = await cycleTLS.post(url, options);
 const putResponse = await cycleTLS.put(url, options);
 const deleteResponse = await cycleTLS.delete(url, options);
 // ... and more!
 
-// ⚠️ Still need to parse responses!
+// Still need to parse responses
 const data = await getResponse.json();
 ```
 
 ```javascript
-// ✨ WEBSOCKET CONNECTIONS
+// WebSocket connections
 const wsResponse = await cycleTLS.ws('wss://echo.websocket.org', {
   ja3: 'your_ja3_string',
   userAgent: 'your_user_agent'
@@ -726,7 +714,7 @@ if (wsResponse.status === 101) {
 ```
 
 ```javascript
-// ✨ SERVER-SENT EVENTS
+// Server-sent events
 const sseResponse = await cycleTLS.sse('https://example.com/events', {
   ja3: 'your_ja3_string',
   userAgent: 'your_user_agent'
@@ -738,7 +726,7 @@ console.log('SSE events:', eventData);
 ```
 
 ```javascript
-// ✨ STREAMING RESPONSES (for large data)
+// Streaming responses
 const response = await cycleTLS('https://example.com/large-file', {
   responseType: 'stream'
 });
@@ -754,7 +742,7 @@ stream.on('end', () => {
 
 ---
 
-### 🐛 Bug Fixes
+### Bug Fixes
 - Fix uncaught `ESRCH` on `SIGINT`/`SIGTERM` signals [#370](https://github.com/Danny-Dasilva/CycleTLS/issues/370)
 - Improved error handling for Windows systems
 - Fixed syntax issues with redirects
@@ -764,9 +752,7 @@ stream.on('end', () => {
 
 ---
 
-### ✅ What Remains Unchanged (Backward Compatible)
-
-**🎯 GOOD NEWS: These parts of your code don't need changes**
+### Unchanged (Backward Compatible)
 
 | Category | Details | Status |
 |----------|---------|--------|
@@ -776,11 +762,7 @@ stream.on('end', () => {
 | **Lifecycle Methods** | `cycleTLS.exit()`, `initCycleTLS()` | ✅ **Unchanged** |
 | **Golang API** | All Go package methods and types | ✅ **100% Compatible** |
 
-**📋 What This Means:**
-- Your request configuration stays the same
-- Your TLS fingerprinting setup works unchanged
-- Your proxy and authentication logic is preserved
-- Only response parsing needs updates
+Request configuration, TLS fingerprinting, and proxy settings stay the same. Only response parsing changes.
 
 ## 1.0.26 - (2-16-2024)
 ### Release Highlights

@@ -1,4 +1,4 @@
-import initCycleTLS from "../dist/index.js";
+import { initCycleTLS } from "../dist/index.js";
 import { withCycleTLS } from "./test-utils.js";
 
 let ja3 =

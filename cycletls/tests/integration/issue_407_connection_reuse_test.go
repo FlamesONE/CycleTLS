@@ -28,8 +28,8 @@ func TestIssue407ConcurrentConnectionReuse(t *testing.T) {
 
 	// Test configuration matching issue #407
 	const (
-		NUM_INSTANCES            = 5  // Number of CycleTLS instances
-		NUM_REQUESTS_PER_INSTANCE = 2  // Number of requests each instance will make
+		NUM_INSTANCES             = 5   // Number of CycleTLS instances
+		NUM_REQUESTS_PER_INSTANCE = 2   // Number of requests each instance will make
 		DELAY_BETWEEN_REQUESTS_MS = 100 // Delay between requests in milliseconds
 	)
 
@@ -92,12 +92,12 @@ func TestIssue407ConcurrentConnectionReuse(t *testing.T) {
 
 	// Analyze results
 	var (
-		totalRequests    int
-		failedRequests   int
-		successRequests  int
-		totalDuration    time.Duration
-		minDuration      = time.Hour
-		maxDuration      time.Duration
+		totalRequests   int
+		failedRequests  int
+		successRequests int
+		totalDuration   time.Duration
+		minDuration     = time.Hour
+		maxDuration     time.Duration
 	)
 
 	for res := range results {

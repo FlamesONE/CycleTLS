@@ -1,6 +1,6 @@
-import initCycleTLS from "../dist/index.js";
+import CycleTLS, { CycleTLSError } from "../dist/index.js";
 import http from "http";
-import { withCycleTLS } from "./test-utils.js";
+import { withCycleTLS } from "./test-utils";
 
 jest.setTimeout(30000);
 
@@ -14,16 +14,16 @@ describe("Read timeout handling", () => {
       if (req.url === "/slow-body") {
         // Send headers immediately
         res.writeHead(200, { "Content-Type": "text/plain" });
-        
+
         // Start sending body but then delay indefinitely
         res.write("Start of response...");
-        
+
         // Never end the response - this will trigger a read timeout
         // The connection stays open but no more data is sent
       } else if (req.url === "/delayed-body") {
         // Send headers immediately
         res.writeHead(200, { "Content-Type": "text/plain" });
-        
+
         // Send partial body after a delay
         setTimeout(() => {
           res.write("Delayed chunk...");
@@ -46,45 +46,33 @@ describe("Read timeout handling", () => {
   });
 
   test("Should handle read timeout with proper error response", async () => {
-    await withCycleTLS({ port: 9117 }, async (cycleTLS) => {
+    await withCycleTLS({ port: 9117, timeout: 3000 }, async (cycleTLS) => {
       // Test with a server that starts sending but then stalls
-      const response = await cycleTLS(
-        `http://localhost:${serverPort}/slow-body`,
-        {
-          body: "",
-          timeout: 3, // 3 second timeout
-        },
-        "get"
-      );
-
-      // Should receive a 408 timeout status
-      expect(response.status).toBe(408);
-      const data = await response.text();
-      expect(data).toContain("deadline exceeded");
+      // New API throws on timeout instead of returning status 408
+      await expect(
+        cycleTLS.request({
+          url: `http://localhost:${serverPort}/slow-body`,
+          timeout: 3000, // 3 second timeout in ms
+        })
+      ).rejects.toThrow(/timeout/i);
     });
   });
 
   test("Should handle mid-stream timeout without hanging", async () => {
-    await withCycleTLS({ port: 9118 }, async (cycleTLS) => {
+    await withCycleTLS({ port: 9118, timeout: 1000 }, async (cycleTLS) => {
       // Test with a server that delays mid-body
-      const response = await cycleTLS(
-        `http://localhost:${serverPort}/delayed-body`,
-        {
-          body: "",
-          timeout: 1, // 1 second timeout - will trigger before delayed chunk
-        },
-        "get"
-      );
-
-      // Should receive a 408 timeout status
-      expect(response.status).toBe(408);
-      const data = await response.text();
-      expect(data).toContain("deadline exceeded");
+      // New API throws on timeout
+      await expect(
+        cycleTLS.request({
+          url: `http://localhost:${serverPort}/delayed-body`,
+          timeout: 1000, // 1 second timeout in ms - will trigger before delayed chunk
+        })
+      ).rejects.toThrow(/timeout/i);
     });
   });
 
   test("Process should not restart on read timeout errors", async () => {
-    await withCycleTLS({ port: 9119, debug: true }, async (cycleTLS) => {
+    await withCycleTLS({ port: 9119, debug: true, timeout: 1000 }, async (cycleTLS) => {
       // Capture console output to verify no restart messages
       const originalLog = console.log;
       const originalError = console.error;
@@ -101,16 +89,12 @@ describe("Read timeout handling", () => {
 
       try {
         // Make request that will timeout
-        const response = await cycleTLS(
-          `http://localhost:${serverPort}/slow-body`,
-          {
-            body: "",
-            timeout: 1,
-          },
-          "get"
-        );
-
-        expect(response.status).toBe(408);
+        await expect(
+          cycleTLS.request({
+            url: `http://localhost:${serverPort}/slow-body`,
+            timeout: 1000,
+          })
+        ).rejects.toThrow();
 
         // Verify no fatal error or restart messages in logs
         const hasRestart = logs.some(log =>

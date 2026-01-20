@@ -1,7 +1,7 @@
 // const initCycleTLS = require('./src/index');
-import initCycleTLS from "../dist/index.js";
+import { initCycleTLS } from "../dist/index.js";
 const { performance } = require("perf_hooks");
-// Typescript: import initCycleTLS from 'cycletls';
+// Typescript: import { initCycleTLS } from 'cycletls';
 
 (async () => {
   const cycleTLS = await initCycleTLS();

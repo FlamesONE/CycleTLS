@@ -1,5 +1,18 @@
-import initCycleTLS from "../dist/index.js";
-import { withCycleTLS } from "./test-utils.js";
+import CycleTLS from "../dist/index.js";
+import { withCycleTLS, streamToJson } from "./test-utils";
+
+interface TlsPeetResponse {
+  tls: { ja3: string };
+  user_agent: string;
+  http2: {
+    sent_frames: Array<{
+      frame_type: string;
+      length: number;
+      settings?: string[];
+      increment?: number;
+    }>;
+  };
+}
 
 test("Test latest Chrome frame headers", async () => {
   await withCycleTLS({ port: 9011 }, async (cycleTLS) => {
@@ -8,8 +21,8 @@ test("Test latest Chrome frame headers", async () => {
     const UA =
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36";
 
-    const response = await cycleTLS('https://tls.peet.ws/api/all', {
-      body: '',
+    const response = await cycleTLS.request({
+      url: 'https://tls.peet.ws/api/all',
       ja3: ja3,
       userAgent: UA,
     });
@@ -30,7 +43,7 @@ test("Test latest Chrome frame headers", async () => {
       length: 4,
     };
 
-    const result = await response.json();
+    const result = await streamToJson<TlsPeetResponse>(response.body);
     expect(result.tls.ja3).toEqual(ja3);
     expect(result.user_agent).toEqual(UA);
     expect(result.http2.sent_frames[0]).toMatchObject(expectedSentFrames0);
@@ -46,7 +59,6 @@ test("Test latest Firefox frame headers", async () => {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:101.0) Gecko/20100101 Firefox/101.0";
 
     const response = await cycleTLS.get("https://tls.peet.ws/api/all", {
-      body: "",
       ja3: ja3,
       userAgent: UA,
     });
@@ -64,16 +76,18 @@ test("Test latest Firefox frame headers", async () => {
       increment: 12517377,
       length: 4,
     };
-    if (typeof (await response.json()) === "object") {
-      expect((await response.json())?.tls?.ja3).toEqual(ja3);
-      expect((await response.json())?.http2?.sent_frames[0]).toMatchObject(
+
+    const result = await streamToJson<TlsPeetResponse>(response.body);
+    if (typeof result === "object") {
+      expect(result.tls?.ja3).toEqual(ja3);
+      expect(result.http2?.sent_frames[0]).toMatchObject(
         expectedSentFrames0
       );
-      expect((await response.json())?.http2?.sent_frames[1]).toMatchObject(
+      expect(result.http2?.sent_frames[1]).toMatchObject(
         expectedSentFrames1
       );
     } else {
-      throw "Object decode error";
+      throw new Error("Object decode error");
     }
   });
 });

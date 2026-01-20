@@ -757,7 +757,7 @@ func TestLRU_NilConnectionHandling(t *testing.T) {
 
 	// Add an entry with nil conn
 	rt.cachedConnections["nil-conn:443"] = &cachedConn{
-		conn:     nil, // nil connection
+		conn:     nil,                                             // nil connection
 		lastUsed: time.Now().Add(-connectionMaxAge - time.Minute), // expired
 	}
 

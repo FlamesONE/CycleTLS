@@ -1,4 +1,4 @@
-import initCycleTLS from "../dist/index.js";
+import { initCycleTLS } from "../dist/index.js";
 import * as http from "http";
 import * as https from "https";
 import * as fs from "fs";

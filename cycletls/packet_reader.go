@@ -196,3 +196,89 @@ func parseCreditMessage(data []byte) (string, uint32, error) {
 
 	return requestID, credits, nil
 }
+
+// -----------------------------------------------------------------------------
+// WebSocket command parsing (V2 protocol)
+// -----------------------------------------------------------------------------
+
+// ClientMessage represents a parsed message from the TypeScript client.
+type ClientMessage struct {
+	RequestID string
+	Method    string
+	// For credit messages
+	Credits uint32
+	// For ws_send messages
+	MessageType int // 1 = text, 2 = binary
+	Data        []byte
+	// For ws_close messages
+	CloseCode   int
+	CloseReason string
+}
+
+// parseClientMessage parses any client message and returns a ClientMessage struct.
+// Supported methods: "credit", "ws_send", "ws_close"
+func parseClientMessage(data []byte) (ClientMessage, error) {
+	r := NewReader(data)
+
+	requestID, err := r.ReadString()
+	if err != nil {
+		return ClientMessage{}, err
+	}
+
+	method, err := r.ReadString()
+	if err != nil {
+		return ClientMessage{}, err
+	}
+
+	msg := ClientMessage{
+		RequestID: requestID,
+		Method:    method,
+	}
+
+	switch method {
+	case "credit":
+		credits, err := r.ReadU32()
+		if err != nil {
+			return ClientMessage{}, err
+		}
+		msg.Credits = credits
+
+	case "ws_send":
+		// Format: messageType (1 byte) + data length (4 bytes) + data
+		msgType, err := r.ReadBytes(1)
+		if err != nil {
+			return ClientMessage{}, err
+		}
+		msg.MessageType = int(msgType[0])
+
+		dataLen, err := r.ReadU32()
+		if err != nil {
+			return ClientMessage{}, err
+		}
+
+		msgData, err := r.ReadBytes(int(dataLen))
+		if err != nil {
+			return ClientMessage{}, err
+		}
+		msg.Data = msgData
+
+	case "ws_close":
+		// Format: code (4 bytes) + reason (length-prefixed string)
+		code, err := r.ReadU32()
+		if err != nil {
+			return ClientMessage{}, err
+		}
+		msg.CloseCode = int(code)
+
+		reason, err := r.ReadString()
+		if err != nil {
+			return ClientMessage{}, err
+		}
+		msg.CloseReason = reason
+
+	default:
+		return ClientMessage{}, fmt.Errorf("unknown method %q", method)
+	}
+
+	return msg, nil
+}

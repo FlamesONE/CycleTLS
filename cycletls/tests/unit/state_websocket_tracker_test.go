@@ -220,4 +220,3 @@ func TestRegisterWebSocketOverwrite(t *testing.T) {
 		t.Fatal("RegisterOverwrite: second registration should overwrite with replacement data")
 	}
 }
-

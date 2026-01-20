@@ -1,4 +1,4 @@
-import initCycleTLS, { CycleTLSWebSocketResponse } from '../dist/index.js';
+import CycleTLS from '../dist/index.js';
 import * as http from 'http';
 import * as WebSocket from 'ws';
 import { AddressInfo } from 'net';
@@ -7,14 +7,14 @@ import { AddressInfo } from 'net';
 jest.setTimeout(30000);
 
 describe('WebSocket Tests', () => {
-  let cycleTLS: any;
+  let cycleTLS: CycleTLS;
   let wsServer: WebSocket.Server;
   let httpServer: http.Server;
   let serverUrl: string;
 
   beforeAll(async () => {
-    cycleTLS = await initCycleTLS();
-    
+    cycleTLS = new CycleTLS();
+
     // Create a local WebSocket server for testing (similar to Go tests)
     httpServer = http.createServer();
     wsServer = new WebSocket.Server({ server: httpServer });
@@ -42,8 +42,8 @@ describe('WebSocket Tests', () => {
   });
 
   afterAll(async () => {
-    await cycleTLS.exit();
-    
+    await cycleTLS.close();
+
     // Close the test servers
     await new Promise<void>((resolve) => {
       wsServer.close(() => {
@@ -60,11 +60,16 @@ describe('WebSocket Tests', () => {
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
       });
 
-      
+
       // Regular HTTP requests to WebSocket servers typically return 400 (Bad Request)
       // since they expect WebSocket upgrade headers, or 408 (timeout)
-      expect([200, 400, 404, 408, 426]).toContain(response.status);
-      
+      expect([200, 400, 404, 408, 426]).toContain(response.statusCode);
+
+      // Drain the body
+      for await (const _ of response.body) {
+        // drain
+      }
+
     } catch (error) {
       // This may fail if server doesn't handle HTTP requests
       expect(true).toBe(true);
@@ -77,13 +82,13 @@ describe('WebSocket Tests', () => {
     expect(serverUrl).toContain('ws://localhost:');
     expect(wsServer).toBeDefined();
     expect(httpServer).toBeDefined();
-    
+
     // Test that the server is listening
     expect(httpServer.listening).toBe(true);
   });
 
-  // Note: The dedicated .ws() and .sse() methods may not be fully implemented 
+  // Note: The dedicated .ws() and .sse() methods may not be fully implemented
   // in the current version, but the underlying functionality works via regular
-  // HTTP requests as demonstrated in the Go tests. The tests above verify 
+  // HTTP requests as demonstrated in the Go tests. The tests above verify
   // that the basic infrastructure is in place.
 });

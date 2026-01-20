@@ -158,3 +158,129 @@ export function parseErrorPayload(payload: Buffer): ErrorPayload {
   const message = r.readString();
   return { statusCode, message };
 }
+
+// -----------------------------------------------------------------------------
+// WebSocket Frame Parsers
+// -----------------------------------------------------------------------------
+
+/**
+ * WebSocket open payload with negotiated protocol and extensions.
+ */
+export interface WebSocketOpenPayload {
+  protocol?: string;
+  extensions?: string;
+}
+
+/**
+ * Parse a "ws_open" frame payload.
+ * Format: length (4 bytes) + JSON data
+ */
+export function parseWebSocketOpenPayload(payload: Buffer): WebSocketOpenPayload {
+  // Read length prefix (4 bytes)
+  const length = payload.readUInt32BE(0);
+  // Extract JSON data after the length prefix
+  const jsonData = payload.subarray(4, 4 + length);
+  const json = jsonData.toString("utf8");
+  if (!json || json.length === 0) {
+    return {};
+  }
+  try {
+    return JSON.parse(json) as WebSocketOpenPayload;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * WebSocket message payload.
+ */
+export interface WebSocketMessagePayload {
+  /** 1 = text, 2 = binary */
+  messageType: number;
+  data: Buffer;
+}
+
+/**
+ * Parse a "ws_message" frame payload.
+ * Format: messageType (1 byte) + length (4 bytes) + data
+ */
+export function parseWebSocketMessagePayload(payload: Buffer): WebSocketMessagePayload {
+  const messageType = payload.readUInt8(0);
+  const length = payload.readUInt32BE(1);
+  const data = payload.subarray(5, 5 + length);
+  return { messageType, data };
+}
+
+/**
+ * WebSocket close payload.
+ */
+export interface WebSocketClosePayload {
+  code: number;
+  reason: string;
+}
+
+/**
+ * Parse a "ws_close" frame payload.
+ * Format: length (4 bytes) + JSON data
+ */
+export function parseWebSocketClosePayload(payload: Buffer): WebSocketClosePayload {
+  // Read length prefix (4 bytes)
+  const length = payload.readUInt32BE(0);
+  // Extract JSON data after the length prefix
+  const jsonData = payload.subarray(4, 4 + length);
+  const json = jsonData.toString("utf8");
+  if (!json || json.length === 0) {
+    return { code: 1000, reason: "" };
+  }
+  try {
+    const parsed = JSON.parse(json) as { code?: number; reason?: string };
+    return {
+      code: parsed.code ?? 1000,
+      reason: parsed.reason ?? "",
+    };
+  } catch {
+    return { code: 1000, reason: "" };
+  }
+}
+
+// -----------------------------------------------------------------------------
+// WebSocket Frame Builders (client to server)
+// -----------------------------------------------------------------------------
+
+/**
+ * Build a WebSocket send packet to send data to the server.
+ * Format: requestId (length-prefixed) + "ws_send" (length-prefixed) + messageType (1 byte) + dataLength (4 bytes) + data
+ */
+export function buildWebSocketSendPacket(
+  requestId: string,
+  data: Buffer,
+  isBinary: boolean
+): Buffer {
+  const w = new BufferWriter();
+  w.writeString(requestId);
+  w.writeString("ws_send");
+  // Message type: 1 = text, 2 = binary
+  const messageType = isBinary ? 2 : 1;
+  const typeBuf = Buffer.alloc(1);
+  typeBuf.writeUInt8(messageType, 0);
+  // Data length (4 bytes, big-endian)
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32BE(data.length, 0);
+  return Buffer.concat([w.toBuffer(), typeBuf, lenBuf, data]);
+}
+
+/**
+ * Build a WebSocket close packet.
+ */
+export function buildWebSocketClosePacket(
+  requestId: string,
+  code: number,
+  reason: string
+): Buffer {
+  const w = new BufferWriter();
+  w.writeString(requestId);
+  w.writeString("ws_close");
+  w.writeU32(code);
+  w.writeString(reason);
+  return w.toBuffer();
+}

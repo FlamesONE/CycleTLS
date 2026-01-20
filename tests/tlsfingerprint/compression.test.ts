@@ -1,0 +1,255 @@
+/**
+ * Compression tests against tlsfingerprint.com
+ *
+ * Tests gzip, deflate, and brotli compression handling.
+ * The streaming CycleTLS client returns raw compressed bytes, so we manually
+ * decompress in the tests to validate the response.
+ *
+ * Mirrors Go tests in cycletls/tests/integration/tlsfingerprint/compression_test.go
+ */
+
+import CycleTLS from "../../dist/index.js";
+import {
+  TEST_SERVER_URL,
+  getDefaultOptions,
+  assertTLSFieldsPresent,
+  decompressGzip,
+  decompressDeflate,
+  decompressBrotli,
+  CompressionResponse,
+} from "./helpers";
+
+// Longer timeout for network requests
+jest.setTimeout(90000);
+
+describe("TLS Fingerprint - Compression", () => {
+  let client: CycleTLS;
+
+  beforeEach(() => {
+    client = new CycleTLS({
+      port: 9119,
+      debug: false,
+      timeout: 30000,
+      autoSpawn: true,
+    });
+  });
+
+  afterEach(async () => {
+    await client.close();
+  });
+
+  describe("Gzip Compression", () => {
+    it("should handle gzip compressed response", async () => {
+      const options = getDefaultOptions();
+      const response = await client.request({
+        url: `${TEST_SERVER_URL}/gzip`,
+        ...options,
+        headers: {
+          "Accept-Encoding": "gzip, deflate, br",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      // Manually decompress the gzip response
+      const body = await decompressGzip<CompressionResponse>(response.body);
+
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+
+      // Verify gzipped flag is true
+      expect(body.gzipped).toBe(true);
+    });
+
+    it("should decompress gzip and validate TLS fields", async () => {
+      const options = getDefaultOptions();
+      const response = await client.get(`${TEST_SERVER_URL}/gzip`, options);
+
+      expect(response.statusCode).toBe(200);
+
+      // Decompress and parse JSON
+      const body = await decompressGzip<CompressionResponse>(response.body);
+
+      expect(body.gzipped).toBe(true);
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+
+      // Verify JA3 fingerprint is present
+      expect(body.ja3).toBeDefined();
+      expect(body.ja3.length).toBeGreaterThan(50);
+    });
+  });
+
+  describe("Deflate Compression", () => {
+    it("should handle deflate compressed response", async () => {
+      const options = getDefaultOptions();
+      const response = await client.request({
+        url: `${TEST_SERVER_URL}/deflate`,
+        ...options,
+        headers: {
+          // Request only deflate to ensure server responds with deflate encoding
+          "Accept-Encoding": "deflate",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      // Manually decompress the deflate response
+      const body = await decompressDeflate<CompressionResponse>(response.body);
+
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+
+      // Verify deflated flag is true
+      expect(body.deflated).toBe(true);
+    });
+
+    it("should decompress deflate and validate TLS fields", async () => {
+      const options = getDefaultOptions();
+      const response = await client.get(`${TEST_SERVER_URL}/deflate`, options);
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressDeflate<CompressionResponse>(response.body);
+
+      expect(body.deflated).toBe(true);
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+    });
+  });
+
+  describe("Brotli Compression", () => {
+    it("should handle brotli compressed response", async () => {
+      const options = getDefaultOptions();
+      const response = await client.request({
+        url: `${TEST_SERVER_URL}/brotli`,
+        ...options,
+        headers: {
+          "Accept-Encoding": "gzip, deflate, br",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      // Manually decompress the brotli response
+      const body = await decompressBrotli<CompressionResponse>(response.body);
+
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+
+      // Verify brotli flag is true
+      expect(body.brotli).toBe(true);
+    });
+
+    it("should decompress brotli and validate TLS fields", async () => {
+      const options = getDefaultOptions();
+      const response = await client.get(`${TEST_SERVER_URL}/brotli`, options);
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressBrotli<CompressionResponse>(response.body);
+
+      expect(body.brotli).toBe(true);
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+    });
+  });
+
+  describe("Compression with specific Accept-Encoding", () => {
+    it("should work with only gzip Accept-Encoding", async () => {
+      const options = getDefaultOptions();
+      const response = await client.request({
+        url: `${TEST_SERVER_URL}/gzip`,
+        ...options,
+        headers: {
+          "Accept-Encoding": "gzip",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressGzip<CompressionResponse>(response.body);
+      expect(body.gzipped).toBe(true);
+    });
+
+    it("should work with only deflate Accept-Encoding", async () => {
+      const options = getDefaultOptions();
+      const response = await client.request({
+        url: `${TEST_SERVER_URL}/deflate`,
+        ...options,
+        headers: {
+          "Accept-Encoding": "deflate",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressDeflate<CompressionResponse>(response.body);
+      expect(body.deflated).toBe(true);
+    });
+
+    it("should work with only br Accept-Encoding", async () => {
+      const options = getDefaultOptions();
+      const response = await client.request({
+        url: `${TEST_SERVER_URL}/brotli`,
+        ...options,
+        headers: {
+          "Accept-Encoding": "br",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressBrotli<CompressionResponse>(response.body);
+      expect(body.brotli).toBe(true);
+    });
+  });
+
+  describe("All compression types with TLS fingerprint validation", () => {
+    it("should have valid TLS fingerprint fields for /gzip", async () => {
+      const options = getDefaultOptions();
+      const response = await client.get(`${TEST_SERVER_URL}/gzip`, options);
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressGzip<CompressionResponse>(response.body);
+
+      // Must have all required TLS fields
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+
+      // Compression flag should be true
+      expect(body.gzipped).toBe(true);
+
+      // JA3 should be a non-empty string
+      expect(typeof body.ja3).toBe("string");
+      expect(body.ja3.length).toBeGreaterThan(50);
+
+      // JA3 hash should be MD5 format (32 hex chars)
+      expect(body.ja3_hash).toMatch(/^[a-f0-9]{32}$/);
+    });
+
+    it("should have valid TLS fingerprint fields for /deflate", async () => {
+      const options = getDefaultOptions();
+      const response = await client.get(`${TEST_SERVER_URL}/deflate`, options);
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressDeflate<CompressionResponse>(response.body);
+
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+      expect(body.deflated).toBe(true);
+      expect(typeof body.ja3).toBe("string");
+      expect(body.ja3.length).toBeGreaterThan(50);
+      expect(body.ja3_hash).toMatch(/^[a-f0-9]{32}$/);
+    });
+
+    it("should have valid TLS fingerprint fields for /brotli", async () => {
+      const options = getDefaultOptions();
+      const response = await client.get(`${TEST_SERVER_URL}/brotli`, options);
+
+      expect(response.statusCode).toBe(200);
+
+      const body = await decompressBrotli<CompressionResponse>(response.body);
+
+      assertTLSFieldsPresent(body as unknown as Record<string, unknown>);
+      expect(body.brotli).toBe(true);
+      expect(typeof body.ja3).toBe("string");
+      expect(body.ja3.length).toBeGreaterThan(50);
+      expect(body.ja3_hash).toMatch(/^[a-f0-9]{32}$/);
+    });
+  });
+});

@@ -63,7 +63,7 @@ func TestTLS13ForceRenegotiation(t *testing.T) {
 			t.Errorf("❌ CRITICAL: Force TLS 1.3 renegotiation failed: %s", err.Error())
 		} else {
 			t.Logf("🎉 SUCCESS: Force TLS 1.3 renegotiation worked! Status: %d, Duration: %v", response.Status, duration)
-			
+
 			// Check if response indicates TLS 1.3 was used
 			if strings.Contains(string(response.Body), "TLS 1.3") {
 				t.Logf("✅ CONFIRMED: Server response indicates TLS 1.3 was negotiated")
@@ -90,4 +90,3 @@ func TestTLS13ForceRenegotiation(t *testing.T) {
 		}
 	})
 }
-

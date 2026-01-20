@@ -67,7 +67,7 @@ func TestConnectionReuse(t *testing.T) {
 		NextProtos:         []string{"h2", "http/1.1"},
 		InsecureSkipVerify: true, // Skip certificate verification for test server
 	}
-	
+
 	// Start TLS server
 	server.StartTLS()
 	defer server.Close()
@@ -85,7 +85,7 @@ func TestConnectionReuse(t *testing.T) {
 
 	// Make multiple requests using the same client instance to test connection reuse
 	client := cycletls.Init(cycletls.WithRawBytes())
-	defer client.Close()           // Ensure resources are cleaned up
+	defer client.Close() // Ensure resources are cleaned up
 
 	// Make first request
 	resp1, err := client.Do(serverURL+"/first", options, "GET")
@@ -201,7 +201,7 @@ func TestConnectionReuseDisabled(t *testing.T) {
 		NextProtos:         []string{"h2", "http/1.1"},
 		InsecureSkipVerify: true, // Skip certificate verification for test server
 	}
-	
+
 	// Start TLS server
 	server.StartTLS()
 	defer server.Close()
@@ -219,7 +219,7 @@ func TestConnectionReuseDisabled(t *testing.T) {
 
 	// Make multiple requests using the same client instance to test connection reuse disabled
 	client := cycletls.Init(cycletls.WithRawBytes())
-	defer client.Close()           // Ensure resources are cleaned up
+	defer client.Close() // Ensure resources are cleaned up
 
 	// Make first request
 	resp1, err := client.Do(serverURL+"/first", options, "GET")

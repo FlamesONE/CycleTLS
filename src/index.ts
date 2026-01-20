@@ -1869,19 +1869,33 @@ export {
   RequestOptions,
   Response,
   CycleTLSError,
+  CycleTLSWebSocketV2,
+  SSEResponse,
 } from "./flow-control-client";
+// Note: SSEEvent is already exported from the legacy API definitions above
 export { CreditManager } from "./credit-manager";
 export * as Protocol from "./protocol";
 
 // Default export: CycleTLS
 import CycleTLS from "./flow-control-client";
+import { CycleTLSWebSocketV2 } from "./flow-control-client";
 export default CycleTLS;
 
+// Legacy WebSocket class (from legacy API)
 export { CycleTLSWebSocket };
+
+// Streaming API WebSocket (alias for CycleTLSWebSocketV2)
+export { CycleTLSWebSocketV2 as StreamingWebSocket };
+
+// Legacy API for backward compatibility
+export { initCycleTLS };
 
 // CommonJS compatibility
 module.exports = CycleTLS;
 module.exports.default = CycleTLS;
 module.exports.CycleTLS = CycleTLS;
 module.exports.CycleTLSWebSocket = CycleTLSWebSocket;
+module.exports.CycleTLSWebSocketV2 = CycleTLSWebSocketV2;
+module.exports.StreamingWebSocket = CycleTLSWebSocketV2;
+module.exports.initCycleTLS = initCycleTLS;
 module.exports.__esModule = true;

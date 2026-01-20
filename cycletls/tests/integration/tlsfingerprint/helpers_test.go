@@ -10,8 +10,8 @@ import (
 	cycletls "github.com/Danny-Dasilva/CycleTLS/cycletls"
 )
 
-// TestServerURL is the target server for all tests (port 8443 for non-privileged access)
-const TestServerURL = "https://localhost:8443"
+// TestServerURL is the target server for all tests
+const TestServerURL = "https://tlsfingerprint.com"
 
 // Common JA3 fingerprint for all tests (Chrome 120)
 var defaultJA3 = "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0"
@@ -79,9 +79,8 @@ type DelayResponse struct {
 // getDefaultOptions returns standard test options
 func getDefaultOptions() cycletls.Options {
 	return cycletls.Options{
-		Ja3:                defaultJA3,
-		UserAgent:          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		InsecureSkipVerify: true,
+		Ja3:       defaultJA3,
+		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Danny-Dasilva/CycleTLS/cycletls/state"
 	"github.com/gorilla/websocket"
 	"golang.org/x/sync/errgroup"
 )
@@ -98,6 +99,38 @@ func readCreditPacketV2(conn wsConnV2, expectedRequestID string) (uint32, error)
 	}
 
 	return credits, nil
+}
+
+// readClientMessageV2 reads any client message (credit, ws_send, ws_close).
+func readClientMessageV2(conn wsConnV2, expectedRequestID string) (ClientMessage, error) {
+	msgType, payload, err := conn.ReadMessage()
+	if err != nil {
+		return ClientMessage{}, err
+	}
+
+	if msgType != websocket.BinaryMessage {
+		return ClientMessage{}, fmt.Errorf("expected binary packet")
+	}
+
+	msg, err := parseClientMessage(payload)
+	if err != nil {
+		return ClientMessage{}, err
+	}
+
+	if msg.RequestID != expectedRequestID {
+		return ClientMessage{}, fmt.Errorf("unexpected request id %q", msg.RequestID)
+	}
+
+	return msg, nil
+}
+
+// WebSocketCommandV2 represents a command to send to the target WebSocket.
+type WebSocketCommandV2 struct {
+	Type        string // "send", "close"
+	MessageType int    // 1 = text, 2 = binary (for send)
+	Data        []byte // message data (for send)
+	CloseCode   int    // close code (for close)
+	CloseReason string // close reason (for close)
 }
 
 // -----------------------------------------------------------------------------
@@ -220,18 +253,77 @@ func handleWSRequestV2(ws *websocket.Conn) {
 	})
 
 	// -----------------------------------------------------------------
-	// Credit reader loop
+	// WebSocket command channel (for bidirectional WebSocket support)
+	// -----------------------------------------------------------------
+
+	// Create command channel for WebSocket connections
+	var wsCommandCh chan WebSocketCommandV2
+	isWebSocket := req.Options.Protocol == "websocket"
+	if isWebSocket {
+		wsCommandCh = make(chan WebSocketCommandV2, 32)
+		res.wsCommandCh = wsCommandCh
+	}
+
+	// -----------------------------------------------------------------
+	// Client message reader loop (handles credits and WebSocket commands)
 	// -----------------------------------------------------------------
 
 	g.Go(func() error {
 		defer cancel()
+		if wsCommandCh != nil {
+			defer close(wsCommandCh)
+		}
+
+		log.Printf("[V2 Reader] Starting, isWebSocket=%v, protocol=%s", isWebSocket, req.Options.Protocol)
 
 		for {
-			credits, err := readCreditPacketV2(conn, req.RequestID)
-			if err != nil {
-				return err
+			if isWebSocket {
+				// For WebSocket: handle all message types
+				msg, err := readClientMessageV2(conn, req.RequestID)
+				if err != nil {
+					log.Printf("[V2 Reader] Error: %v", err)
+					return err
+				}
+
+				log.Printf("[V2 Reader] Received message: method=%s", msg.Method)
+
+				switch msg.Method {
+				case "credit":
+					limiter.Add(int64(msg.Credits))
+				case "ws_send":
+					log.Printf("[V2 Reader] Forwarding ws_send: type=%d, len=%d", msg.MessageType, len(msg.Data))
+					// Forward send command to dispatcher
+					select {
+					case wsCommandCh <- WebSocketCommandV2{
+						Type:        "send",
+						MessageType: msg.MessageType,
+						Data:        msg.Data,
+					}:
+						log.Printf("[V2 Reader] ws_send forwarded successfully")
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				case "ws_close":
+					log.Printf("[V2 Reader] Forwarding ws_close")
+					// Forward close command to dispatcher
+					select {
+					case wsCommandCh <- WebSocketCommandV2{
+						Type:        "close",
+						CloseCode:   msg.CloseCode,
+						CloseReason: msg.CloseReason,
+					}:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+			} else {
+				// For HTTP/SSE: only handle credit messages
+				credits, err := readCreditPacketV2(conn, req.RequestID)
+				if err != nil {
+					return err
+				}
+				limiter.Add(int64(credits))
 			}
-			limiter.Add(int64(credits))
 		}
 	})
 
@@ -270,9 +362,12 @@ func handleWSRequestV2(ws *websocket.Conn) {
 // processRequestV2 processes a request for v2 flow control mode.
 // It uses the parent context for cancellation.
 func processRequestV2(request cycleTLSRequest, parentCtx context.Context) fullRequest {
+	log.Printf("[V2] processRequestV2: protocol=%s, url=%s", request.Options.Protocol, request.Options.URL)
+
 	// Handle protocol-specific clients
 	switch request.Options.Protocol {
 	case "websocket":
+		log.Printf("[V2] Routing to dispatchWebSocketRequest")
 		return dispatchWebSocketRequest(request)
 	case "sse":
 		return dispatchSSERequest(request)
@@ -414,25 +509,224 @@ func dispatcherAsyncV2(res fullRequest, sender *frameSender) {
 	}
 }
 
-// dispatchSSEAsyncV2 handles SSE connections with flow control.
+// dispatchSSEAsyncV2 handles SSE connections with flow control using native V2 protocol.
 func dispatchSSEAsyncV2(res fullRequest, sender *frameSender) {
-	// For now, delegate to existing SSE handler with wrapper
-	// TODO: Implement full SSE v2 support
-	legacySender := &legacyFrameSenderWrapper{sender: sender}
-	dispatchSSEAsync(res, legacySender.chanWrite)
+	limiter := res.limiter
+
+	// Perform the SSE HTTP request
+	resp, err := res.client.Do(res.req)
+	if err != nil {
+		parsedError := parseError(err)
+		sender.send(buildErrorFrame(res.options.RequestID, parsedError.StatusCode, parsedError.ErrorMsg+"-> \n"+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+
+	// Get final URL after redirects
+	finalUrl := res.options.Options.URL
+	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
+		finalUrl = resp.Request.URL.String()
+	}
+
+	// Send response frame with headers
+	if !sender.send(buildResponseFrame(res.options.RequestID, resp.StatusCode, finalUrl, resp.Header)) {
+		return
+	}
+
+	// Stream SSE body with flow control
+	const bufferSize = 8192
+	chunkBuffer := make([]byte, bufferSize)
+	ctx := res.ctx
+	if ctx == nil {
+		ctx = res.req.Context()
+	}
+
+	for {
+		if ctx.Err() != nil {
+			debugLogger.Printf("SSE request %s context canceled during processing", res.options.RequestID)
+			return
+		}
+
+		n, readErr := resp.Body.Read(chunkBuffer)
+
+		// Send any data we got before handling errors
+		if n > 0 {
+			if limiter != nil {
+				if err := limiter.Acquire(int64(n), ctx); err != nil {
+					return
+				}
+			}
+			if !sender.send(buildDataFrame(res.options.RequestID, chunkBuffer[:n])) {
+				return
+			}
+		}
+
+		// Handle read result
+		if readErr == io.EOF {
+			sender.send(buildEndFrame(res.options.RequestID))
+			return
+		}
+		if readErr != nil {
+			parsedError := parseError(readErr)
+			sender.send(buildErrorFrame(res.options.RequestID, parsedError.StatusCode, parsedError.ErrorMsg))
+			return
+		}
+	}
 }
 
-// dispatchWebSocketAsyncV2 handles WebSocket connections with flow control.
+// dispatchWebSocketAsyncV2 handles WebSocket connections with flow control using native V2 protocol.
+// It supports bidirectional communication: receiving messages from the target server and
+// sending messages from the TypeScript client via the wsCommandCh channel.
 func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
-	// For now, delegate to existing WebSocket handler with wrapper
-	// TODO: Implement full WebSocket v2 support
-	legacySender := &legacyFrameSenderWrapper{sender: sender}
-	dispatchWebSocketAsync(res, legacySender.chanWrite)
-}
+	requestID := res.options.RequestID
 
-// legacyFrameSenderWrapper wraps frameSender to provide legacy safeChannelWriter interface.
-// TODO: This is incomplete - chanWrite is nil. SSE/WebSocket v2 needs proper implementation.
-type legacyFrameSenderWrapper struct {
-	sender    *frameSender
-	chanWrite *safeChannelWriter
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in dispatchWebSocketAsyncV2 for request %s: %v", requestID, r)
+		}
+		state.UnregisterRequest(requestID)
+		state.UnregisterWebSocket(requestID)
+	}()
+
+	// Connect to WebSocket endpoint
+	conn, resp, err := res.wsClient.Connect(res.options.Options.URL)
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		sender.send(buildWebSocketErrorFrame(requestID, statusCode, err.Error()))
+		sender.send(buildEndFrame(requestID))
+		return
+	}
+	defer conn.Close()
+
+	// Extract negotiated protocol and extensions
+	negotiatedProtocol := resp.Header.Get("Sec-WebSocket-Protocol")
+	negotiatedExtensions := resp.Header.Get("Sec-WebSocket-Extensions")
+
+	// Register the WebSocket connection for state tracking
+	state.RegisterRequest(requestID, res.cancel)
+
+	// Send initial response with headers
+	if !sender.send(buildResponseFrame(requestID, resp.StatusCode, res.options.Options.URL, resp.Header)) {
+		return
+	}
+
+	// Send ws_open event
+	if !sender.send(buildWebSocketOpenFrame(requestID, negotiatedProtocol, negotiatedExtensions)) {
+		return
+	}
+
+	// If there's body data, send it as the first WebSocket message
+	if res.options.Options.Body != "" {
+		err := conn.WriteMessage(websocket.TextMessage, []byte(res.options.Options.Body))
+		if err != nil {
+			debugLogger.Printf("WebSocket write error: %s", err.Error())
+		}
+	}
+
+	ctx := res.ctx
+	if ctx == nil {
+		ctx = res.req.Context()
+	}
+
+	// Read deadline timeout
+	const wsReadDeadline = 30 * time.Second
+
+	// Channel for messages read from the target WebSocket
+	readCh := make(chan struct {
+		messageType int
+		data        []byte
+		err         error
+	}, 1)
+
+	// Goroutine to read from target WebSocket
+	go func() {
+		for {
+			conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+			messageType, message, err := conn.ReadMessage()
+
+			select {
+			case readCh <- struct {
+				messageType int
+				data        []byte
+				err         error
+			}{messageType, message, err}:
+			case <-ctx.Done():
+				return
+			}
+
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Main loop: handle both incoming messages and outgoing commands
+	for {
+		select {
+		case <-ctx.Done():
+			sender.send(buildWebSocketCloseFrame(requestID, 1000, "Context canceled"))
+			sender.send(buildEndFrame(requestID))
+			return
+
+		case cmd, ok := <-res.wsCommandCh:
+			if !ok {
+				// Command channel closed, connection ending
+				return
+			}
+
+			switch cmd.Type {
+			case "send":
+				// Send message to target WebSocket
+				msgType := websocket.TextMessage
+				if cmd.MessageType == 2 {
+					msgType = websocket.BinaryMessage
+				}
+				err := conn.WriteMessage(msgType, cmd.Data)
+				if err != nil {
+					debugLogger.Printf("WebSocket send error: %s", err.Error())
+					sender.send(buildWebSocketErrorFrame(requestID, 0, err.Error()))
+				}
+
+			case "close":
+				// Close the target WebSocket connection
+				closeCode := cmd.CloseCode
+				if closeCode == 0 {
+					closeCode = websocket.CloseNormalClosure
+				}
+				err := conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(closeCode, cmd.CloseReason))
+				if err != nil {
+					debugLogger.Printf("WebSocket close error: %s", err.Error())
+				}
+				sender.send(buildWebSocketCloseFrame(requestID, closeCode, cmd.CloseReason))
+				sender.send(buildEndFrame(requestID))
+				return
+			}
+
+		case msg := <-readCh:
+			if msg.err != nil {
+				// Check if timeout - continue the loop
+				if netErr, ok := msg.err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+					continue
+				}
+
+				if websocket.IsCloseError(msg.err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					sender.send(buildWebSocketCloseFrame(requestID, websocket.CloseNormalClosure, "Connection closed normally"))
+				} else {
+					debugLogger.Printf("WebSocket read error: %s", msg.err.Error())
+					sender.send(buildWebSocketErrorFrame(requestID, 0, msg.err.Error()))
+				}
+				sender.send(buildEndFrame(requestID))
+				return
+			}
+
+			// Send ws_message frame to client
+			if !sender.send(buildWebSocketMessageFrame(requestID, msg.messageType, msg.data)) {
+				return
+			}
+		}
+	}
 }
