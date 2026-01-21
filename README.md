@@ -111,7 +111,11 @@ const CycleTLS = require('cycletls').default;
 ```
 
 ## JA4R (Raw) TLS Fingerprinting
+## JA4R (Raw) TLS Fingerprinting
 
+> **Important:** Pass `ja4r` to configure the TLS ClientHello. JA4 (hash) is a report-only value; configuring with a JA4 hash will not change your fingerprint.
+
+JA4R is the raw format of JA4 fingerprinting that allows explicit configuration of cipher suites, extensions, and signature algorithms:
 > **Important:** Pass `ja4r` to configure the TLS ClientHello. JA4 (hash) is a report-only value; configuring with a JA4 hash will not change your fingerprint.
 
 JA4R is the raw format of JA4 fingerprinting that allows explicit configuration of cipher suites, extensions, and signature algorithms:
@@ -141,6 +145,7 @@ const CycleTLS = require('cycletls').default;
 ```
 
 ### Golang JA4R Example
+### Golang JA4R Example
 ```go
 package main
 
@@ -151,10 +156,13 @@ import (
 
 func main() {
 	client := cycletls.Init(cycletls.WithRawBytes())
+	client := cycletls.Init(cycletls.WithRawBytes())
 	defer client.Close()
 
 	// Chrome JA4R fingerprint (raw format)
+	// Chrome JA4R fingerprint (raw format)
 	response, err := client.Do("https://tls.peet.ws/api/all", cycletls.Options{
+		Ja4r: "t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601",
 		Ja4r: "t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601",
 		UserAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
 	}, "GET")
@@ -162,6 +170,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println("Response with JA4R:", response.Status)
 	log.Println("Response with JA4R:", response.Status)
 }
 ```
@@ -547,6 +556,49 @@ func main() {
 
 **Note:** Use `Init()` for standard compatibility with `chan Response`. Use `Init(cycletls.WithRawBytes())` when you need the performance benefits of handling raw `[]byte` responses directly.
 
+#### Performance Enhancement: Raw Bytes Option
+
+The default `Init()` method provides the standard v1 API with `chan Response`. For performance-critical applications that can handle raw bytes, use the `WithRawBytes()` option:
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"github.com/Danny-Dasilva/CycleTLS/cycletls"
+)
+
+func main() {
+	// Use WithRawBytes() option for performance enhancement
+	client := cycletls.Init(cycletls.WithRawBytes())
+	defer client.Close()
+	
+	// Queue a request
+	go func() {
+		client.Queue("https://ja3er.com/json", cycletls.Options{
+			Ja3: "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0",
+			UserAgent: "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0",
+		}, "GET")
+	}()
+	
+	// Performance pattern: receive raw bytes from RespChanV2
+	select {
+	case responseBytes := <-client.RespChanV2:
+		var response cycletls.Response
+		json.Unmarshal(responseBytes, &response)
+		fmt.Printf("Status: %d\n", response.Status)
+		fmt.Printf("Body: %s\n", response.Body)
+	// Alternative: still supports v1 pattern via RespChan
+	case response := <-client.RespChan:
+		fmt.Printf("Status: %d\n", response.Status)
+		fmt.Printf("Body: %s\n", response.Body)
+	}
+}
+```
+
+**Note:** Use `Init()` for standard compatibility with `chan Response`. Use `Init(cycletls.WithRawBytes())` when you need the performance benefits of handling raw `[]byte` responses directly.
+
 ## Creating an instance
 
 In order to create a `CycleTLS` instance, you can run the following:
@@ -866,6 +918,8 @@ client := &http.Client{Transport: transport}
   bodyBytes: new Uint8Array([0x00, 0x01]),
   // JA3 token to send with request
   ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
+  // JA4R token for enhanced fingerprinting (raw format)
+  ja4r: 't13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601',
   // JA4R token for enhanced fingerprinting (raw format)
   ja4r: 't13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601',
   // User agent for request
@@ -2789,6 +2843,7 @@ type Browser struct {
 	UserAgent          string
 	JA3                string
 	JA4r               string
+	JA4r               string
 	HTTP2Fingerprint   string
 	QUICFingerprint    string
 	InsecureSkipVerify bool
@@ -2814,11 +2869,16 @@ type SSEEvent struct {
 </details>
 
 ### How do I use JA4R fingerprinting?
+### How do I use JA4R fingerprinting?
 
 <details>
 
 > **Note:** Pass `ja4r` (raw format) to configure fingerprints. JA4 hashes are for observation only.
+> **Note:** Pass `ja4r` (raw format) to configure fingerprints. JA4 hashes are for observation only.
 
+JA4R is the raw format for configuring TLS fingerprints with explicit cipher suites and extensions.
+
+### Golang JA4R Fingerprinting
 JA4R is the raw format for configuring TLS fingerprints with explicit cipher suites and extensions.
 
 ### Golang JA4R Fingerprinting
@@ -2836,8 +2896,10 @@ func main() {
 	defer client.Close()
 
 	// Use both JA3 and JA4R fingerprints
+	// Use both JA3 and JA4R fingerprints
 	response, err := client.Do("https://tls.peet.ws/api/clean", cycletls.Options{
 		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
+		Ja4r:      "t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601", // JA4R fingerprint (raw format)
 		Ja4r:      "t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0000,0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601", // JA4R fingerprint (raw format)
 		UserAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.54 Safari/537.36",
 	}, "GET")
@@ -2846,6 +2908,7 @@ func main() {
 		log.Fatal("Request failed: ", err)
 	}
 
+	log.Println("Response with JA4R:", response.Status)
 	log.Println("Response with JA4R:", response.Status)
 }
 ```
