@@ -851,25 +851,19 @@ client := &http.Client{Transport: transport}
 ```js
 {
   // URL for the request (required if not specified as an argument)
-  url: "https://example.com"
+  url: "https://example.com",
   // Method for the request ("head" | "get" | "post" | "put" | "delete" | "trace" | "options" | "connect" | "patch")
-  method: "get" // Default method
+  method: "get", // Default method
   // Custom headers to send
-  headers: { "Authorization": "Bearer someexampletoken" }
-  // Custom cookies to send
-  Cookies: [{
-	"name": "key",
-	"value": "val",
-	"path":  "/docs",
-	"domain":  "google.com",
-				"expires": "Mon, 02-Jan-2022 15:04:05 EST"
-	"maxAge": 90,
-	"secure": false,
-	"httpOnly": true,
-	"sameSite": "Lax"		
-  }],
-  // Body to send with request (must be a string - cannot pass an object)
-  body: '',
+  headers: { "Authorization": "Bearer someexampletoken" },
+  // Cookies to send
+  cookies: [
+    { name: "key", value: "val", path: "/docs", domain: "google.com" }
+  ],
+  // Body to send with request (string)
+  body: "",
+  // Binary body for non-UTF8 payloads
+  bodyBytes: new Uint8Array([0x00, 0x01]),
   // JA3 token to send with request
   ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
   // JA4R token for enhanced fingerprinting (raw format)
@@ -878,26 +872,34 @@ client := &http.Client{Transport: transport}
   userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
   // Proxy to send request through (supports http, socks4, socks5, socks5h)
   proxy: 'http://username:password@hostname.com:443',
-  // Amount of seconds before request timeout (default: 7)
-  timeout: 2,
+  // Timeout before headers arrive (ms)
+  timeout: 2000,
+  // Body stream idle timeout (ms)
+  readTimeout: 500,
   // Toggle if CycleTLS should follow redirects
   disableRedirect: true,
   // Custom header order to send with request (This value will overwrite default header order)
   headerOrder: ["cache-control", "connection", "host"],
+  // Preserve header insertion order exactly as provided
+  orderAsProvided: true,
   // Toggle if CycleTLS should skip verify certificate (If InsecureSkipVerify is true, TLS accepts any certificate presented by the server and any host name in that certificate.)
-  insecureSkipVerify: false	
+  insecureSkipVerify: false,
   // Forces CycleTLS to do a http1 handshake
-  forceHTTP1: false
+  forceHTTP1: false,
   // Forces HTTP/3 protocol
-  forceHTTP3: false
+  forceHTTP3: false,
   // Enable connection reuse across requests
-  enableConnectionReuse: true
+  enableConnectionReuse: true,
   // HTTP/2 fingerprint
-  http2Fingerprint: '1:65536;4:131072;5:16384|12517377|3:0:0:201,5:0:0:101,7:0:0:1,9:0:7:1,11:0:3:1,13:0:0:241|m,p,a,s'
+  http2Fingerprint: '1:65536;4:131072;5:16384|12517377|3:0:0:201,5:0:0:101,7:0:0:1,9:0:7:1,11:0:3:1,13:0:0:241|m,p,a,s',
   // QUIC fingerprint for HTTP/3
-  quicFingerprint: '16030106f2010006ee03039a2b98d81139db0e128ea09eff...'
-  // JA4H HTTP client fingerprint
-  ja4h: 'ge11_73a4f1e_8b3fce7'
+  quicFingerprint: '16030106f2010006ee03039a2b98d81139db0e128ea09eff...',
+  // Disable GREASE for exact JA4 matching
+  disableGrease: false,
+  // Override TLS SNI
+  serverName: "example.com",
+  // Auto retry TLS 1.3 handshake failures
+  tls13AutoRetry: true
 }
 
 ```
@@ -987,7 +989,7 @@ const client = new CycleTLS();
 
 // JavaScript timeout example
 const response = await client.get('https://httpbin.org/delay/10', {
-  timeout: 5, // 5 seconds timeout
+  timeout: 5000, // 5 seconds timeout (ms)
   ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
   userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0'
 });
@@ -1005,10 +1007,10 @@ response, err := client.Do("https://httpbin.org/delay/10", cycletls.Options{
 
 ### Timeout Error Response
 
-When a request times out, CycleTLS returns a response with:
+When a request times out, the streaming client rejects with `CycleTLSError` (status code `408`). The legacy client returns a response with:
 - **Status Code**: `408` (Request Timeout)
 - **Body**: Contains error message describing the timeout
-- **Error**: JavaScript will have the response object, Go will have `err != nil`
+- **Error**: Go will have `err != nil`
 
 ### JavaScript Timeout Error Handling
 
@@ -1021,25 +1023,22 @@ const CycleTLS = require('cycletls').default;
 
   try {
     const response = await client.get('https://httpbin.org/delay/10', {
-      timeout: 2, // Will timeout after 2 seconds
+      timeout: 2000, // Will timeout after 2 seconds (ms)
       ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
       userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0'
     });
 
-    if (response.statusCode === 408) {
-      // Consume body to get error message
-      const chunks = [];
-      for await (const chunk of response.body) chunks.push(chunk);
-      console.log('Request timed out:', Buffer.concat(chunks).toString());
-    } else {
-      // Consume body and parse JSON
-      const chunks = [];
-      for await (const chunk of response.body) chunks.push(chunk);
-      const data = JSON.parse(Buffer.concat(chunks).toString());
-      console.log('Success:', data);
-    }
+    // Consume body and parse JSON
+    const chunks = [];
+    for await (const chunk of response.body) chunks.push(chunk);
+    const data = JSON.parse(Buffer.concat(chunks).toString());
+    console.log('Success:', data);
   } catch (error) {
-    console.error('Request failed:', error);
+    if (error && error.statusCode === 408) {
+      console.error('Request timed out:', error.message);
+    } else {
+      console.error('Request failed:', error);
+    }
   } finally {
     await client.close();
   }
@@ -1236,12 +1235,16 @@ interface Response {
   requestId: string;
   // Status code returned from server (Number)
   statusCode: number;
+  // Alias for statusCode (Number)
+  status: number;
   // Final URL after redirects (String)
   finalUrl: string;
   // Headers returned from the server (Object)
   headers: Record<string, string[]>;
   // Body as a readable stream (for large responses)
   body: Readable;
+  // Alias for body (Readable)
+  data: Readable;
 
   // Helper methods (buffer entire response)
   json<T>(): Promise<T>;       // Parse as JSON
@@ -2408,7 +2411,7 @@ const CycleTLS = require('cycletls').default;
 
   // Send messages (text or binary)
   ws.send('text message');
-  ws.send(Buffer.from([0x01, 0x02, 0x03]), { binary: true });
+  ws.send(Buffer.from([0x01, 0x02, 0x03]));
 
   // Close connection gracefully
   ws.close(1000, 'Normal closure');
@@ -2418,19 +2421,19 @@ const CycleTLS = require('cycletls').default;
 ### WebSocket Properties and Methods
 
 ```typescript
-interface CycleTLSWebSocket {
+interface CycleTLSWebSocketV2 {
   // Properties
-  url: string;                              // WebSocket URL
+  URL: string;                              // WebSocket URL
   readyState: number;                       // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
   protocol: string;                         // Negotiated subprotocol
   extensions: string;                       // Negotiated extensions
   binaryType: 'nodebuffer' | 'arraybuffer'; // Binary data format
 
   // Methods
-  send(data: string | Buffer | ArrayBuffer, options?: { binary?: boolean }, callback?: (err?: Error) => void): void;
+  send(data: string | Buffer, callback?: (err?: Error) => void): void;
   close(code?: number, reason?: string): void;
-  ping(data?: Buffer | string, mask?: boolean, callback?: (err?: Error) => void): void;
-  pong(data?: Buffer | string, mask?: boolean, callback?: (err?: Error) => void): void;
+  ping(data?: Buffer | string): void;
+  pong(data?: Buffer | string): void;
   terminate(): void;  // Immediate close without handshake
 
   // Events
