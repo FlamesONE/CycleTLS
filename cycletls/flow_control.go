@@ -3,6 +3,7 @@ package cycletls
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 )
 
@@ -128,6 +129,7 @@ func (cw *creditWindow) TryAcquire(n int64) bool {
 }
 
 // Add adds credits and wakes up waiting goroutines.
+// Includes overflow protection: saturates at MaxInt64 instead of wrapping.
 func (cw *creditWindow) Add(n int64) {
 	if cw.guard(n) {
 		return
@@ -140,7 +142,12 @@ func (cw *creditWindow) Add(n int64) {
 		return
 	}
 
-	cw.window += n
+	// Overflow protection: saturate at MaxInt64 instead of wrapping to negative
+	if n > 0 && cw.window > math.MaxInt64-n {
+		cw.window = math.MaxInt64
+	} else {
+		cw.window += n
+	}
 	cw.cond.Broadcast()
 }
 

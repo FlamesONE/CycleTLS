@@ -1,6 +1,6 @@
 //go:build !integration
 
-package cycletls
+package unit
 
 import (
 	"encoding/base64"

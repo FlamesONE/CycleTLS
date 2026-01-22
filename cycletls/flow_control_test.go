@@ -2,6 +2,7 @@ package cycletls
 
 import (
 	"context"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +206,29 @@ func TestCreditWindowConcurrent(t *testing.T) {
 
 	wg.Wait()
 	// If we get here without deadlock or panic, the test passes
+}
+
+func TestCreditWindowOverflowProtection(t *testing.T) {
+	// Start with window near MaxInt64
+	cw := newCreditWindow(math.MaxInt64 - 10)
+
+	// Adding 20 should saturate at MaxInt64, not overflow to negative
+	cw.Add(20)
+
+	// Verify it saturated at MaxInt64
+	cw.mu.Lock()
+	if cw.window != math.MaxInt64 {
+		t.Errorf("expected window to saturate at MaxInt64, got %d", cw.window)
+	}
+	cw.mu.Unlock()
+
+	// Adding more should still stay at MaxInt64
+	cw.Add(1000)
+	cw.mu.Lock()
+	if cw.window != math.MaxInt64 {
+		t.Errorf("expected window to remain at MaxInt64, got %d", cw.window)
+	}
+	cw.mu.Unlock()
 }
 
 func TestFrameSenderBasic(t *testing.T) {

@@ -796,6 +796,8 @@ export class CycleTLS extends EventEmitter {
             case "end": {
               // Clear read timeout - transfer complete
               clearReadTimeout();
+              // Flush any pending credits before closing
+              creditManager.flush();
               bodyStream.push(null);
               ws.close();
               break;
@@ -804,6 +806,8 @@ export class CycleTLS extends EventEmitter {
             case "error": {
               const error = parseErrorPayload(frame.payload);
               clearReadTimeout();
+              // Flush any pending credits before closing
+              creditManager.flush();
               if (!resolved) {
                 resolved = true;
                 if (timeoutId !== null) {

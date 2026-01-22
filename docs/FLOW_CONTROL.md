@@ -295,3 +295,32 @@ const client = new CycleTLS({ timeout: 60000 }); // 60 seconds
 | `cycletls/flow_control_test.go` | Credit window unit tests |
 | `cycletls/packet_test.go` | Protocol encoding/decoding |
 | `tests/flow-control.test.ts` | TypeScript integration tests |
+
+## WebSocket Command Buffering
+
+### Buffer Size: 32 Messages
+
+The WebSocket V2 handler uses a buffered channel for command messages:
+
+```go
+// cycletls/ws_handler_v2.go
+wsCommandCh = make(chan WebSocketCommandV2, 32)
+```
+
+**Rationale:**
+- **32 messages** provides backpressure while allowing burst handling
+- Balances memory usage vs. throughput for typical request patterns
+- When buffer fills, sender blocks (natural backpressure)
+- Sized for burst scenarios (e.g., rapid WebSocket message sends)
+
+**Behavior when full:**
+- Sender goroutine blocks until space available
+- This is intentional backpressure, not an error condition
+- Prevents unbounded memory growth from slow consumers
+
+**Tuning considerations:**
+- Increase for high-throughput WebSocket applications with bursty sends
+- Decrease for memory-constrained environments
+- Current value is suitable for most use cases
+
+**Related:** See `initialWindow` and `creditThreshold` in CycleTLSOptions for response body flow control.
