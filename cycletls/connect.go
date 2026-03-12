@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	http "github.com/Danny-Dasilva/fhttp"
 	http2 "github.com/Danny-Dasilva/fhttp/http2"
@@ -136,7 +137,10 @@ func newConnectDialer(proxyURLStr string, UserAgent string) (proxy.ContextDialer
 		return nil, errors.New("scheme " + proxyURL.Scheme + " is not supported")
 	}
 
-	client.Dialer = &net.Dialer{}
+	client.Dialer = &net.Dialer{
+		Timeout:   15 * time.Second, // Don't hang forever connecting to proxy
+		KeepAlive: 30 * time.Second, // Detect dead proxy connections via TCP keepalive
+	}
 
 	if proxyURL.User != nil {
 		if proxyURL.User.Username() != "" {
@@ -242,7 +246,22 @@ func (c *connectDialer) DialContext(ctx context.Context, network, address string
 				if err == nil {
 					return proxyConn, err
 				}
-				// else: carry on and try again
+				// Connection is dead — clear the cache so next request creates a fresh one
+				c.cacheH2Mu.Lock()
+				c.cachedH2ClientConn = nil
+				if c.cachedH2RawConn != nil {
+					_ = c.cachedH2RawConn.Close()
+				}
+				c.cachedH2RawConn = nil
+				c.cacheH2Mu.Unlock()
+				unlocked = true
+			} else {
+				// Connection can't take new requests — it's saturated or dead, clear it
+				c.cachedH2ClientConn = nil
+				if c.cachedH2RawConn != nil {
+					_ = c.cachedH2RawConn.Close()
+				}
+				c.cachedH2RawConn = nil
 			}
 		}
 		if !unlocked {

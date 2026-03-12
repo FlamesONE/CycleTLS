@@ -176,7 +176,28 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Perform the request
-	return transport.RoundTrip(req)
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		// If the request failed with a network error, evict the cached transport
+		// so the next request creates a fresh connection instead of reusing a dead one.
+		errStr := err.Error()
+		if strings.Contains(errStr, "use of closed network connection") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "broken pipe") ||
+			strings.Contains(errStr, "stream error") ||
+			strings.Contains(errStr, "GOAWAY") ||
+			strings.Contains(errStr, "tls:") ||
+			strings.Contains(errStr, "EOF") {
+			rt.Lock()
+			delete(rt.cachedTransports, addr)
+			if conn, exists := rt.cachedConnections[addr]; exists {
+				_ = conn.Close()
+				delete(rt.cachedConnections, addr)
+			}
+			rt.Unlock()
+		}
+	}
+	return resp, err
 }
 
 func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
@@ -342,27 +363,31 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 			}
 
 			http2Transport = http2.Transport{
-				DialTLS:     rt.dialTLSHTTP2,
-				PushHandler: &http2.DefaultPushHandler{},
-				Navigator:   parsedUserAgent.UserAgent,
+				DialTLS:         rt.dialTLSHTTP2,
+				PushHandler:     &http2.DefaultPushHandler{},
+				Navigator:       parsedUserAgent.UserAgent,
+				ReadIdleTimeout: 15 * time.Second, // Detect dead connections via PING
+				PingTimeout:     5 * time.Second,  // Close connection if PING not ack'd in 5s
 			}
 
 			// Apply HTTP/2 fingerprint settings
 			h2Fingerprint.Apply(&http2Transport)
 		} else {
 			http2Transport = http2.Transport{
-				DialTLS:     rt.dialTLSHTTP2,
-				PushHandler: &http2.DefaultPushHandler{},
-				Navigator:   parsedUserAgent.UserAgent,
+				DialTLS:         rt.dialTLSHTTP2,
+				PushHandler:     &http2.DefaultPushHandler{},
+				Navigator:       parsedUserAgent.UserAgent,
+				ReadIdleTimeout: 15 * time.Second,
+				PingTimeout:     5 * time.Second,
 			}
 		}
 
 		rt.cachedTransports[addr] = &http2Transport
 	default:
-		// HTTP/1.x transport - configure to avoid idle channel errors
+		// HTTP/1.x transport
 		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext:    rt.dialTLS,
-			DisableKeepAlives: true, // Disable keep-alives to prevent idle channel errors
+			DialTLSContext: rt.dialTLS,
+			// Keep-alive enabled for connection reuse; dead connections detected by OS TCP keepalive
 		}
 	}
 
@@ -441,17 +466,21 @@ func (rt *roundTripper) retryWithTLS13CompatibleCurves(ctx context.Context, netw
 			}
 
 			http2Transport = http2.Transport{
-				DialTLS:     rt.dialTLSHTTP2,
-				PushHandler: &http2.DefaultPushHandler{},
-				Navigator:   parsedUserAgent.UserAgent,
+				DialTLS:         rt.dialTLSHTTP2,
+				PushHandler:     &http2.DefaultPushHandler{},
+				Navigator:       parsedUserAgent.UserAgent,
+				ReadIdleTimeout: 15 * time.Second,
+				PingTimeout:     5 * time.Second,
 			}
 
 			h2Fingerprint.Apply(&http2Transport)
 		} else {
 			http2Transport = http2.Transport{
-				DialTLS:     rt.dialTLSHTTP2,
-				PushHandler: &http2.DefaultPushHandler{},
-				Navigator:   parsedUserAgent.UserAgent,
+				DialTLS:         rt.dialTLSHTTP2,
+				PushHandler:     &http2.DefaultPushHandler{},
+				Navigator:       parsedUserAgent.UserAgent,
+				ReadIdleTimeout: 15 * time.Second,
+				PingTimeout:     5 * time.Second,
 			}
 		}
 
@@ -459,8 +488,7 @@ func (rt *roundTripper) retryWithTLS13CompatibleCurves(ctx context.Context, netw
 	default:
 		// HTTP/1.x transport
 		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext:    rt.dialTLS,
-			DisableKeepAlives: true,
+			DialTLSContext: rt.dialTLS,
 		}
 	}
 
@@ -516,17 +544,21 @@ func (rt *roundTripper) retryWithOriginalTLS12JA3(ctx context.Context, network, 
 			}
 
 			http2Transport = http2.Transport{
-				DialTLS:     rt.dialTLSHTTP2,
-				PushHandler: &http2.DefaultPushHandler{},
-				Navigator:   parsedUserAgent.UserAgent,
+				DialTLS:         rt.dialTLSHTTP2,
+				PushHandler:     &http2.DefaultPushHandler{},
+				Navigator:       parsedUserAgent.UserAgent,
+				ReadIdleTimeout: 15 * time.Second,
+				PingTimeout:     5 * time.Second,
 			}
 
 			h2Fingerprint.Apply(&http2Transport)
 		} else {
 			http2Transport = http2.Transport{
-				DialTLS:     rt.dialTLSHTTP2,
-				PushHandler: &http2.DefaultPushHandler{},
-				Navigator:   parsedUserAgent.UserAgent,
+				DialTLS:         rt.dialTLSHTTP2,
+				PushHandler:     &http2.DefaultPushHandler{},
+				Navigator:       parsedUserAgent.UserAgent,
+				ReadIdleTimeout: 15 * time.Second,
+				PingTimeout:     5 * time.Second,
 			}
 		}
 
@@ -534,8 +566,7 @@ func (rt *roundTripper) retryWithOriginalTLS12JA3(ctx context.Context, network, 
 	default:
 		// HTTP/1.x transport
 		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext:    rt.dialTLS,
-			DisableKeepAlives: true,
+			DialTLSContext: rt.dialTLS,
 		}
 	}
 
