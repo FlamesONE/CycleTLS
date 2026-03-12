@@ -187,7 +187,9 @@ func processRequest(request cycleTLSRequest) (result fullRequest) {
 		request.Options.Proxy,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS processRequest: client creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	// Handle both string body and byte body
@@ -199,7 +201,9 @@ func processRequest(request cycleTLSRequest) (result fullRequest) {
 	}
 	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(request.Options.Method), request.Options.URL, bodyReader)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS processRequest: request creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 	headerorder := []string{}
 	//master header order, all your headers will be ordered based on this list and anything extra will be appended to the end
@@ -268,7 +272,9 @@ func processRequest(request cycleTLSRequest) (result fullRequest) {
 	//set our Host header
 	u, err := url.Parse(request.Options.URL)
 	if err != nil {
-		panic(err)
+		log.Printf("CycleTLS processRequest: URL parse failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	//append our normal headers
@@ -339,7 +345,9 @@ func dispatchHTTP3Request(request cycleTLSRequest) (result fullRequest) {
 		request.Options.Proxy,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS dispatch: client creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	// Handle both string body and byte body
@@ -351,7 +359,9 @@ func dispatchHTTP3Request(request cycleTLSRequest) (result fullRequest) {
 	}
 	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(request.Options.Method), request.Options.URL, bodyReader)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS dispatch: request creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	// Set headers for HTTP/3 request
@@ -364,7 +374,7 @@ func dispatchHTTP3Request(request cycleTLSRequest) (result fullRequest) {
 	// Parse URL for Host header
 	u, err := url.Parse(request.Options.URL)
 	if err != nil {
-		panic(err)
+		log.Printf("CycleTLS: URL parse error: %v", err); cancel(); return fullRequest{options: request}
 	}
 	// Respect user-provided Host header for domain fronting; otherwise default to URL host
 	if _, ok := request.Options.Headers["Host"]; !ok {
@@ -427,7 +437,9 @@ func dispatchSSERequest(request cycleTLSRequest) (result fullRequest) {
 		request.Options.Proxy,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS dispatch: client creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	// Prepare headers for SSE
@@ -442,7 +454,9 @@ func dispatchSSERequest(request cycleTLSRequest) (result fullRequest) {
 	// Create a placeholder request for consistency
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, request.Options.URL, nil)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS dispatch: request creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	activeRequestsMutex.Lock()
@@ -505,7 +519,9 @@ func dispatchWebSocketRequest(request cycleTLSRequest) (result fullRequest) {
 	// Create a placeholder request for consistency
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, request.Options.URL, nil)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("CycleTLS dispatch: request creation failed: %v", err)
+		cancel()
+		return fullRequest{options: request}
 	}
 
 	activeRequestsMutex.Lock()
@@ -1334,6 +1350,8 @@ func (r Response) JSONBody() map[string]interface{} {
 	return result
 }
 
+var cleanupOnce sync.Once
+
 // Init creates a CycleTLS client with v1 default behavior (chan Response)
 // Use WithRawBytes() option for performance enhancement with chan []byte
 func Init(opts ...Option) CycleTLS {
@@ -1349,6 +1367,17 @@ func Init(opts ...Option) CycleTLS {
 	for _, opt := range opts {
 		opt(&client)
 	}
+
+	// Start periodic client pool cleanup (once globally)
+	cleanupOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				cleanupClientPool(10 * time.Minute)
+			}
+		}()
+	})
 
 	return client
 }
@@ -1390,14 +1419,9 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 		HeaderOrder:        options.HeaderOrder,
 	}
 
-	// Note: Don't automatically set HeaderOrder from UserAgent here as it can interfere with connection management
-	// The pseudo-header order should be set through explicit HTTP2Fingerprint or Options.HeaderOrder
-
 	// Create HTTP client with connection reuse
-	// Default to true for connection reuse
 	enableConnectionReuse := true
 	if options.EnableConnectionReuse == false {
-		// Only disable if explicitly set to false
 		enableConnectionReuse = false
 	}
 
@@ -1413,14 +1437,22 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 		return Response{}, err
 	}
 
-	// Create request using fhttp
+	// Create context with hard timeout to prevent hanging forever on dead proxies
+	timeout := options.Timeout
+	if timeout == 0 {
+		timeout = 15
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second+5*time.Second)
+	defer cancel()
+
+	// Create request using fhttp with context
 	var bodyReader io.Reader
 	if len(options.BodyBytes) > 0 {
 		bodyReader = bytes.NewReader(options.BodyBytes)
 	} else {
 		bodyReader = strings.NewReader(options.Body)
 	}
-	req, err := http.NewRequest(Method, URL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, Method, URL, bodyReader)
 	if err != nil {
 		return Response{}, err
 	}

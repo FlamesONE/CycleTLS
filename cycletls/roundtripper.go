@@ -22,7 +22,7 @@ import (
 var errProtocolNegotiated = errors.New("protocol negotiated")
 
 type roundTripper struct {
-	sync.Mutex
+	sync.RWMutex
 
 	// Per-address mutexes for preventing concurrent transport creation
 	addressMutexes    map[string]*sync.Mutex
@@ -158,14 +158,25 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Use cached transport if available, otherwise create a new one
-	if _, ok := rt.cachedTransports[addr]; !ok {
+	rt.RLock()
+	transport, ok := rt.cachedTransports[addr]
+	rt.RUnlock()
+
+	if !ok {
 		if err := rt.getTransport(req, addr); err != nil {
 			return nil, err
 		}
+		rt.RLock()
+		transport = rt.cachedTransports[addr]
+		rt.RUnlock()
+	}
+
+	if transport == nil {
+		return nil, fmt.Errorf("no transport available for %s", addr)
 	}
 
 	// Perform the request
-	return rt.cachedTransports[addr].RoundTrip(req)
+	return transport.RoundTrip(req)
 }
 
 func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
@@ -210,15 +221,16 @@ func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
 }
 
 func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
-	rt.Lock()
-	defer rt.Unlock()
-
-	// Return cached connection if available
+	// Quick check under read lock: return cached connection if available
+	rt.RLock()
 	if conn := rt.cachedConnections[addr]; conn != nil {
+		rt.RUnlock()
 		return conn, nil
 	}
+	rt.RUnlock()
 
-	// Establish raw connection
+	// Establish raw connection WITHOUT holding the lock — this can take seconds
+	// on dead proxies and must not block other addresses.
 	rawConn, err := rt.dialer.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
@@ -284,7 +296,7 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 		return nil, err
 	}
 
-	// Perform TLS handshake
+	// Perform TLS handshake — NO lock held, this can take seconds on slow proxies
 	if err = conn.Handshake(); err != nil {
 		_ = conn.Close()
 
@@ -305,7 +317,11 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 		return nil, fmt.Errorf("uTlsConn.Handshake() error: %+v", err)
 	}
 
-	// If transport already exists, return connection
+	// Re-acquire lock to update caches
+	rt.Lock()
+	defer rt.Unlock()
+
+	// If transport already exists (created by another goroutine while we were handshaking), return connection
 	if rt.cachedTransports[addr] != nil {
 		return conn, nil
 	}
@@ -530,7 +546,10 @@ func (rt *roundTripper) retryWithOriginalTLS12JA3(ctx context.Context, network, 
 }
 
 func (rt *roundTripper) dialTLSHTTP2(network, addr string, _ *utls.Config) (net.Conn, error) {
-	return rt.dialTLS(context.Background(), network, addr)
+	// Use a context with timeout to prevent hanging forever on dead connections
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return rt.dialTLS(ctx, network, addr)
 }
 
 func (rt *roundTripper) getDialTLSAddr(req *http.Request) string {
@@ -581,6 +600,28 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 			_ = conn.Close()
 			delete(rt.cachedConnections, addr)
 		}
+	}
+
+	// Evict cached transports to prevent unbounded map growth (keep max 256 entries)
+	const maxCachedTransports = 256
+	if len(rt.cachedTransports) > maxCachedTransports {
+		// Evict all transports not matching selectedAddr — they'll be recreated on demand
+		keepAddr := ""
+		if len(selectedAddr) > 0 {
+			keepAddr = selectedAddr[0]
+		}
+		for tAddr := range rt.cachedTransports {
+			if tAddr != keepAddr {
+				delete(rt.cachedTransports, tAddr)
+			}
+		}
+	}
+
+	// Evict stale address mutexes to prevent unbounded map growth
+	if rt.addressMutexes != nil && len(rt.addressMutexes) > maxCachedTransports {
+		rt.addressMutexLock.Lock()
+		rt.addressMutexes = make(map[string]*sync.Mutex)
+		rt.addressMutexLock.Unlock()
 	}
 }
 

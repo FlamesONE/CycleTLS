@@ -186,6 +186,9 @@ func generateClientKey(browser Browser, timeout int, disableRedirect bool, proxy
 	return fmt.Sprintf("%x", hash[:16]) // Use first 16 bytes for shorter key
 }
 
+// Maximum number of clients in the pool before eviction kicks in
+const maxClientPoolSize = 512
+
 // getOrCreateClient retrieves a client from the pool or creates a new one
 func getOrCreateClient(browser Browser, timeout int, disableRedirect bool, userAgent string, enableConnectionReuse bool, proxyURL ...string) (fhttp.Client, error) {
 	// If connection reuse is disabled, always create a new client
@@ -200,31 +203,34 @@ func getOrCreateClient(browser Browser, timeout int, disableRedirect bool, userA
 
 	clientKey := generateClientKey(browser, timeout, disableRedirect, proxy)
 
-	// Try to get existing client from pool
-	advancedClientPoolMutex.RLock()
+	// Try to get existing client from pool — use write lock to safely update LastUsed
+	advancedClientPoolMutex.Lock()
 	if entry, exists := advancedClientPool[clientKey]; exists {
-		// Update last used time
 		entry.LastUsed = time.Now()
 		client := entry.Client
-		advancedClientPoolMutex.RUnlock()
+		advancedClientPoolMutex.Unlock()
 		return client, nil
 	}
-	advancedClientPoolMutex.RUnlock()
+	advancedClientPoolMutex.Unlock()
 
-	// Create new client if not found in pool
+	// Create new client outside the lock (can be slow due to proxy dialer setup)
+	client, err := createNewClient(browser, timeout, disableRedirect, userAgent, proxyURL...)
+	if err != nil {
+		return fhttp.Client{}, err
+	}
+
 	advancedClientPoolMutex.Lock()
 	defer advancedClientPoolMutex.Unlock()
 
-	// Double-check in case another goroutine created it while we were waiting for the write lock
+	// Double-check in case another goroutine created it while we were creating
 	if entry, exists := advancedClientPool[clientKey]; exists {
 		entry.LastUsed = time.Now()
 		return entry.Client, nil
 	}
 
-	// Create new client
-	client, err := createNewClient(browser, timeout, disableRedirect, userAgent, proxyURL...)
-	if err != nil {
-		return fhttp.Client{}, err
+	// Evict oldest entries if pool is too large
+	if len(advancedClientPool) >= maxClientPoolSize {
+		evictOldestClients(maxClientPoolSize / 4) // evict 25%
 	}
 
 	// Add to pool
@@ -236,6 +242,44 @@ func getOrCreateClient(browser Browser, timeout int, disableRedirect bool, userA
 	}
 
 	return client, nil
+}
+
+// evictOldestClients removes the N oldest (by LastUsed) entries from the pool.
+// Must be called with advancedClientPoolMutex held.
+func evictOldestClients(count int) {
+	if count <= 0 || len(advancedClientPool) == 0 {
+		return
+	}
+
+	type kv struct {
+		key      string
+		lastUsed time.Time
+	}
+
+	entries := make([]kv, 0, len(advancedClientPool))
+	for k, v := range advancedClientPool {
+		entries = append(entries, kv{k, v.LastUsed})
+	}
+
+	// Simple selection: find oldest entries
+	for i := 0; i < count && i < len(entries); i++ {
+		oldest := i
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].lastUsed.Before(entries[oldest].lastUsed) {
+				oldest = j
+			}
+		}
+		entries[i], entries[oldest] = entries[oldest], entries[i]
+
+		// Close connections before removing
+		key := entries[i].key
+		if entry, exists := advancedClientPool[key]; exists {
+			if transport, ok := entry.Client.Transport.(*roundTripper); ok {
+				transport.CloseIdleConnections()
+			}
+			delete(advancedClientPool, key)
+		}
+	}
 }
 
 // createNewClient creates a new HTTP client (internal function)

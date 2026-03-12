@@ -24,8 +24,30 @@ type SocksDialer struct {
 	socksDial func(string, string) (net.Conn, error)
 }
 
-func (d *SocksDialer) DialContext(_ context.Context, network, addr string) (net.Conn, error) {
-	return d.socksDial(network, addr)
+func (d *SocksDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	// Respect context cancellation/deadline for SOCKS connections
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		conn, err := d.socksDial(network, addr)
+		ch <- dialResult{conn, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.conn, res.err
+	case <-ctx.Done():
+		// Leak the dial goroutine — it will finish eventually
+		// but we won't block the caller
+		go func() {
+			if res := <-ch; res.conn != nil {
+				_ = res.conn.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 func (d *SocksDialer) Dial(network, addr string) (net.Conn, error) {
@@ -321,6 +343,10 @@ func (h *http2Conn) Close() error {
 		retErr = err
 	}
 	if err := h.out.Close(); err != nil {
+		retErr = err
+	}
+	// Also close the underlying TCP connection to prevent leaks
+	if err := h.Conn.Close(); err != nil && retErr == nil {
 		retErr = err
 	}
 	return retErr
