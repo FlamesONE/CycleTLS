@@ -24,9 +24,12 @@ var errProtocolNegotiated = errors.New("protocol negotiated")
 type roundTripper struct {
 	sync.RWMutex
 
-	// Per-address mutexes for preventing concurrent transport creation
-	addressMutexes    map[string]*sync.Mutex
-	addressMutexLock  sync.Mutex
+	// Per-address semaphores for context-aware transport creation serialization.
+	// Channel-based instead of sync.Mutex so that goroutines blocked on lock
+	// can be unblocked when the request context is cancelled, preventing
+	// goroutine leaks when doCycleTLS times out.
+	addressSems     map[string]chan struct{}
+	addressSemsLock sync.Mutex
 
 	// TLS fingerprinting options
 	JA3              string
@@ -204,23 +207,34 @@ func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http":
 		// Allow connection reuse by removing DisableKeepAlives
+		rt.Lock()
 		rt.cachedTransports[addr] = &http.Transport{
 			DialContext: rt.dialer.DialContext,
 		}
+		rt.Unlock()
 		return nil
 	case "https":
 	default:
 		return fmt.Errorf("invalid URL scheme: [%v]", req.URL.Scheme)
 	}
 
-	// Use per-address mutex to serialize transport creation and avoid races
-	addressMutex := rt.getAddressMutex(addr)
-	addressMutex.Lock()
-	defer addressMutex.Unlock()
+	// Context-aware semaphore acquisition to prevent goroutine leaks.
+	// Unlike sync.Mutex.Lock(), this respects context cancellation so
+	// timed-out requests don't pile up waiting forever.
+	sem := rt.getAddressSemaphore(addr)
+	select {
+	case <-sem:
+		// Acquired semaphore
+	case <-req.Context().Done():
+		return req.Context().Err()
+	}
+	defer func() { sem <- struct{}{} }() // Release semaphore
 
-	// Double-check if transport was created while we were waiting for the lock
-	if _, exists := rt.cachedTransports[addr]; exists {
-		// Another goroutine already created the transport
+	// Double-check if transport was created while we were waiting (with proper locking)
+	rt.RLock()
+	_, exists := rt.cachedTransports[addr]
+	rt.RUnlock()
+	if exists {
 		return nil
 	}
 
@@ -229,11 +243,8 @@ func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
 	switch err {
 	case errProtocolNegotiated:
 		// Transport and connection have been negotiated and cached by dialTLS
-		// Nothing else to do here.
 	case nil:
 		// A cached connection/transport already exists (e.g., created by another goroutine).
-		// Treat as success instead of panicking.
-		// No action needed; RoundTrip will use the cached transport.
 	default:
 		return err
 	}
@@ -249,6 +260,11 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 		return conn, nil
 	}
 	rt.RUnlock()
+
+	// Check context before expensive dial
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Establish raw connection WITHOUT holding the lock — this can take seconds
 	// on dead proxies and must not block other addresses.
@@ -276,6 +292,7 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 		// Use QUIC fingerprint
 		spec, err = QUICStringToSpec(rt.QUICFingerprint, rt.UserAgent, rt.ForceHTTP1)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, err
 		}
 	} else if rt.JA3 != "" {
@@ -289,18 +306,21 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 			spec, err = StringToSpec(rt.JA3, rt.UserAgent, rt.ForceHTTP1)
 		}
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, err
 		}
 	} else if rt.JA4r != "" {
 		// Use JA4r (raw) fingerprint
 		spec, err = JA4RStringToSpec(rt.JA4r, rt.UserAgent, rt.ForceHTTP1, rt.DisableGrease, serverName)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, err
 		}
 	} else {
 		// Default to Chrome fingerprint
 		spec, err = StringToSpec(DefaultChrome_JA3, rt.UserAgent, rt.ForceHTTP1)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, err
 		}
 	}
@@ -314,6 +334,7 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 
 	// Apply TLS fingerprint
 	if err := conn.ApplyPreset(spec); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 
@@ -338,68 +359,59 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 		return nil, fmt.Errorf("uTlsConn.Handshake() error: %+v", err)
 	}
 
-	// Re-acquire lock to update caches
+	// Cache transport and connection under write lock
 	rt.Lock()
 	defer rt.Unlock()
 
-	// If transport already exists (created by another goroutine while we were handshaking), return connection
+	// If transport already exists (created by another goroutine while we were handshaking), close ours
 	if rt.cachedTransports[addr] != nil {
 		return conn, nil
 	}
 
-	// Create appropriate transport based on negotiated protocol
+	// Create and cache transport
+	rt.cacheTransportLocked(addr, conn)
+
+	return nil, errProtocolNegotiated
+}
+
+// cacheTransportLocked creates an appropriate transport based on negotiated protocol
+// and caches it along with the connection. Must be called with rt.Lock() held.
+func (rt *roundTripper) cacheTransportLocked(addr string, conn *utls.UConn) {
 	switch conn.ConnectionState().NegotiatedProtocol {
 	case http2.NextProtoTLS:
-		// HTTP/2 transport
 		parsedUserAgent := parseUserAgent(rt.UserAgent)
+		http2Transport := http2.Transport{
+			DialTLS:         rt.dialTLSHTTP2,
+			PushHandler:     &http2.DefaultPushHandler{},
+			Navigator:       parsedUserAgent.UserAgent,
+			ReadIdleTimeout: 15 * time.Second,
+			PingTimeout:     5 * time.Second,
+		}
 
-		// Use HTTP/2 fingerprint if specified
-		var http2Transport http2.Transport
 		if rt.HTTP2Fingerprint != "" {
-			// Parse and apply HTTP/2 fingerprint
 			h2Fingerprint, err := NewHTTP2Fingerprint(rt.HTTP2Fingerprint)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse HTTP/2 fingerprint: %v", err)
-			}
-
-			http2Transport = http2.Transport{
-				DialTLS:         rt.dialTLSHTTP2,
-				PushHandler:     &http2.DefaultPushHandler{},
-				Navigator:       parsedUserAgent.UserAgent,
-				ReadIdleTimeout: 15 * time.Second, // Detect dead connections via PING
-				PingTimeout:     5 * time.Second,  // Close connection if PING not ack'd in 5s
-			}
-
-			// Apply HTTP/2 fingerprint settings
-			h2Fingerprint.Apply(&http2Transport)
-		} else {
-			http2Transport = http2.Transport{
-				DialTLS:         rt.dialTLSHTTP2,
-				PushHandler:     &http2.DefaultPushHandler{},
-				Navigator:       parsedUserAgent.UserAgent,
-				ReadIdleTimeout: 15 * time.Second,
-				PingTimeout:     5 * time.Second,
+			if err == nil {
+				h2Fingerprint.Apply(&http2Transport)
 			}
 		}
 
 		rt.cachedTransports[addr] = &http2Transport
 	default:
-		// HTTP/1.x transport
 		rt.cachedTransports[addr] = &http.Transport{
 			DialTLSContext: rt.dialTLS,
-			// Keep-alive enabled for connection reuse; dead connections detected by OS TCP keepalive
 		}
 	}
 
-	// Cache the connection for future use
 	rt.cachedConnections[addr] = conn
-
-	return nil, errProtocolNegotiated
 }
 
 // retryWithTLS13CompatibleCurves retries the TLS connection with TLS 1.3 compatible curves
 func (rt *roundTripper) retryWithTLS13CompatibleCurves(ctx context.Context, network, addr, host string) (net.Conn, error) {
-	// Establish raw connection for retry
+	// Check context before retry
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	rawConn, err := rt.dialer.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
@@ -407,171 +419,94 @@ func (rt *roundTripper) retryWithTLS13CompatibleCurves(ctx context.Context, netw
 
 	var spec *utls.ClientHelloSpec
 
-	// Use TLS 1.3 compatible spec based on the original fingerprint type
 	if rt.QUICFingerprint != "" {
-		// For QUIC, we'll use the original spec but this could be enhanced
 		spec, err = QUICStringToSpec(rt.QUICFingerprint, rt.UserAgent, rt.ForceHTTP1)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, fmt.Errorf("failed to create QUIC spec for TLS 1.3 retry: %v", err)
 		}
 	} else if rt.JA3 != "" {
-		// Use TLS 1.3 compatible JA3 spec
 		spec, err = StringToTLS13CompatibleSpec(rt.JA3, rt.UserAgent, rt.ForceHTTP1)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, fmt.Errorf("failed to create TLS 1.3 compatible JA3 spec: %v", err)
 		}
 	} else if rt.JA4r != "" {
-		// For JA4r, we'll use a fallback to default Chrome with TLS 1.3 compatible curves
 		spec, err = StringToTLS13CompatibleSpec(DefaultChrome_JA3, rt.UserAgent, rt.ForceHTTP1)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, fmt.Errorf("failed to create TLS 1.3 compatible JA4 fallback spec: %v", err)
 		}
 	} else {
-		// Default to TLS 1.3 compatible Chrome fingerprint
 		spec, err = StringToTLS13CompatibleSpec(DefaultChrome_JA3, rt.UserAgent, rt.ForceHTTP1)
 		if err != nil {
+			_ = rawConn.Close()
 			return nil, fmt.Errorf("failed to create TLS 1.3 compatible default spec: %v", err)
 		}
 	}
 
-	// Create TLS client for retry
 	conn := utls.UClient(rawConn, &utls.Config{
 		ServerName:         host,
 		OmitEmptyPsk:       true,
 		InsecureSkipVerify: rt.InsecureSkipVerify,
 	}, utls.HelloCustom)
 
-	// Apply TLS 1.3 compatible fingerprint
 	if err := conn.ApplyPreset(spec); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to apply TLS 1.3 compatible preset: %v", err)
 	}
 
-	// Perform TLS handshake for retry
 	if err = conn.Handshake(); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("TLS 1.3 compatible handshake failed: %+v", err)
 	}
 
-	// Create appropriate transport based on negotiated protocol
-	switch conn.ConnectionState().NegotiatedProtocol {
-	case http2.NextProtoTLS:
-		// HTTP/2 transport
-		parsedUserAgent := parseUserAgent(rt.UserAgent)
-
-		var http2Transport http2.Transport
-		if rt.HTTP2Fingerprint != "" {
-			h2Fingerprint, err := NewHTTP2Fingerprint(rt.HTTP2Fingerprint)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse HTTP/2 fingerprint for TLS 1.3 retry: %v", err)
-			}
-
-			http2Transport = http2.Transport{
-				DialTLS:         rt.dialTLSHTTP2,
-				PushHandler:     &http2.DefaultPushHandler{},
-				Navigator:       parsedUserAgent.UserAgent,
-				ReadIdleTimeout: 15 * time.Second,
-				PingTimeout:     5 * time.Second,
-			}
-
-			h2Fingerprint.Apply(&http2Transport)
-		} else {
-			http2Transport = http2.Transport{
-				DialTLS:         rt.dialTLSHTTP2,
-				PushHandler:     &http2.DefaultPushHandler{},
-				Navigator:       parsedUserAgent.UserAgent,
-				ReadIdleTimeout: 15 * time.Second,
-				PingTimeout:     5 * time.Second,
-			}
-		}
-
-		rt.cachedTransports[addr] = &http2Transport
-	default:
-		// HTTP/1.x transport
-		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext: rt.dialTLS,
-		}
-	}
-
-	// Cache the successful TLS 1.3 connection
-	rt.cachedConnections[addr] = conn
+	// Cache transport under write lock
+	rt.Lock()
+	defer rt.Unlock()
+	rt.cacheTransportLocked(addr, conn)
 
 	return nil, errProtocolNegotiated
 }
 
 // retryWithOriginalTLS12JA3 retries the TLS connection with the original TLS 1.2 JA3
 func (rt *roundTripper) retryWithOriginalTLS12JA3(ctx context.Context, network, addr, host string) (net.Conn, error) {
-	// Establish raw connection for fallback to original TLS 1.2 JA3
+	// Check context before retry
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	rawConn, err := rt.dialer.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Use original TLS 1.2 JA3 spec (no upgrade)
 	spec, err := StringToSpec(rt.JA3, rt.UserAgent, rt.ForceHTTP1)
 	if err != nil {
+		_ = rawConn.Close()
 		return nil, fmt.Errorf("failed to create original TLS 1.2 JA3 spec: %v", err)
 	}
 
-	// Create TLS client for fallback
 	conn := utls.UClient(rawConn, &utls.Config{
 		ServerName:         host,
 		OmitEmptyPsk:       true,
 		InsecureSkipVerify: rt.InsecureSkipVerify,
 	}, utls.HelloCustom)
 
-	// Apply original TLS 1.2 fingerprint
 	if err := conn.ApplyPreset(spec); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to apply original TLS 1.2 preset: %v", err)
 	}
 
-	// Perform TLS handshake for fallback
 	if err = conn.Handshake(); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("original TLS 1.2 handshake failed: %+v", err)
 	}
 
-	// Create appropriate transport based on negotiated protocol
-	switch conn.ConnectionState().NegotiatedProtocol {
-	case http2.NextProtoTLS:
-		// HTTP/2 transport
-		parsedUserAgent := parseUserAgent(rt.UserAgent)
-
-		var http2Transport http2.Transport
-		if rt.HTTP2Fingerprint != "" {
-			h2Fingerprint, err := NewHTTP2Fingerprint(rt.HTTP2Fingerprint)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse HTTP/2 fingerprint for TLS 1.2 fallback: %v", err)
-			}
-
-			http2Transport = http2.Transport{
-				DialTLS:         rt.dialTLSHTTP2,
-				PushHandler:     &http2.DefaultPushHandler{},
-				Navigator:       parsedUserAgent.UserAgent,
-				ReadIdleTimeout: 15 * time.Second,
-				PingTimeout:     5 * time.Second,
-			}
-
-			h2Fingerprint.Apply(&http2Transport)
-		} else {
-			http2Transport = http2.Transport{
-				DialTLS:         rt.dialTLSHTTP2,
-				PushHandler:     &http2.DefaultPushHandler{},
-				Navigator:       parsedUserAgent.UserAgent,
-				ReadIdleTimeout: 15 * time.Second,
-				PingTimeout:     5 * time.Second,
-			}
-		}
-
-		rt.cachedTransports[addr] = &http2Transport
-	default:
-		// HTTP/1.x transport
-		rt.cachedTransports[addr] = &http.Transport{
-			DialTLSContext: rt.dialTLS,
-		}
-	}
-
-	// Cache the successful TLS 1.2 fallback connection
-	rt.cachedConnections[addr] = conn
+	// Cache transport under write lock
+	rt.Lock()
+	defer rt.Unlock()
+	rt.cacheTransportLocked(addr, conn)
 
 	return nil, errProtocolNegotiated
 }
@@ -591,22 +526,25 @@ func (rt *roundTripper) getDialTLSAddr(req *http.Request) string {
 	return net.JoinHostPort(req.URL.Host, "443") // Default HTTPS port
 }
 
-// getAddressMutex returns a mutex for the specific address to serialize transport creation
-func (rt *roundTripper) getAddressMutex(addr string) *sync.Mutex {
-	rt.addressMutexLock.Lock()
-	defer rt.addressMutexLock.Unlock()
-	
-	if rt.addressMutexes == nil {
-		rt.addressMutexes = make(map[string]*sync.Mutex)
+// getAddressSemaphore returns a channel-based semaphore for the specific address.
+// The semaphore serializes transport creation while supporting context cancellation
+// via select{}, unlike sync.Mutex which blocks forever.
+func (rt *roundTripper) getAddressSemaphore(addr string) chan struct{} {
+	rt.addressSemsLock.Lock()
+	defer rt.addressSemsLock.Unlock()
+
+	if rt.addressSems == nil {
+		rt.addressSems = make(map[string]chan struct{})
 	}
-	
-	if mu, exists := rt.addressMutexes[addr]; exists {
-		return mu
+
+	if sem, exists := rt.addressSems[addr]; exists {
+		return sem
 	}
-	
-	mu := &sync.Mutex{}
-	rt.addressMutexes[addr] = mu
-	return mu
+
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{} // Initially available
+	rt.addressSems[addr] = sem
+	return sem
 }
 
 // CloseIdleConnections closes connections that have been idle for too long
@@ -618,7 +556,6 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 	// If we have a specific address to keep, only close other connections
 	if len(selectedAddr) > 0 && selectedAddr[0] != "" {
 		addr := selectedAddr[0]
-		// Keep the connection for the provided address, close others
 		for connAddr, conn := range rt.cachedConnections {
 			if connAddr != addr {
 				_ = conn.Close()
@@ -626,7 +563,6 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 			}
 		}
 	} else {
-		// No address specified, close all connections (original behavior)
 		for addr, conn := range rt.cachedConnections {
 			_ = conn.Close()
 			delete(rt.cachedConnections, addr)
@@ -636,7 +572,6 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 	// Evict cached transports to prevent unbounded map growth (keep max 256 entries)
 	const maxCachedTransports = 256
 	if len(rt.cachedTransports) > maxCachedTransports {
-		// Evict all transports not matching selectedAddr — they'll be recreated on demand
 		keepAddr := ""
 		if len(selectedAddr) > 0 {
 			keepAddr = selectedAddr[0]
@@ -648,12 +583,12 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 		}
 	}
 
-	// Evict stale address mutexes to prevent unbounded map growth
-	if rt.addressMutexes != nil && len(rt.addressMutexes) > maxCachedTransports {
-		rt.addressMutexLock.Lock()
-		rt.addressMutexes = make(map[string]*sync.Mutex)
-		rt.addressMutexLock.Unlock()
+	// Evict stale address semaphores to prevent unbounded map growth
+	rt.addressSemsLock.Lock()
+	if len(rt.addressSems) > maxCachedTransports {
+		rt.addressSems = make(map[string]chan struct{})
 	}
+	rt.addressSemsLock.Unlock()
 }
 
 func newRoundTripper(browser Browser, dialer ...proxy.ContextDialer) http.RoundTripper {
@@ -670,7 +605,7 @@ func newRoundTripper(browser Browser, dialer ...proxy.ContextDialer) http.RoundT
 		JA4r:               browser.JA4r,
 		HTTP2Fingerprint:   browser.HTTP2Fingerprint,
 		QUICFingerprint:    browser.QUICFingerprint,
-		USpec:              browser.USpec, // Add USpec field initialization
+		USpec:              browser.USpec,
 		DisableGrease:      browser.DisableGrease,
 		UserAgent:          browser.UserAgent,
 		HeaderOrder:        browser.HeaderOrder,
@@ -682,44 +617,38 @@ func newRoundTripper(browser Browser, dialer ...proxy.ContextDialer) http.RoundT
 		InsecureSkipVerify: browser.InsecureSkipVerify,
 		ForceHTTP1:         browser.ForceHTTP1,
 		ForceHTTP3:         browser.ForceHTTP3,
-
-		// TLS 1.3 specific options
-		TLS13AutoRetry: browser.TLS13AutoRetry,
+		TLS13AutoRetry:     browser.TLS13AutoRetry,
 	}
 }
 
 // makeHTTP3Request performs an HTTP/3 request using the provided HTTP/3 connection
 func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connection) (*http.Response, error) {
-	// Create HTTP/3 RoundTripper with custom dial function that uses our established connection
 	tlsConfig := ConvertUtlsConfig(rt.TLSConfig)
 	if tlsConfig == nil {
 		tlsConfig = &tls.Config{}
 	}
-	// Apply custom SNI if provided
 	if rt.ServerName != "" {
 		tlsConfig.ServerName = rt.ServerName
 	}
 
-	// Create HTTP/3 Transport - let it establish its own connections for now
 	roundTripper := &http3.Transport{
 		TLSClientConfig: tlsConfig,
 		QUICConfig: &quic.Config{
 			HandshakeIdleTimeout:           30 * time.Second,
 			MaxIdleTimeout:                 90 * time.Second,
 			KeepAlivePeriod:                15 * time.Second,
-			InitialStreamReceiveWindow:     512 * 1024,      // 512 KB
-			MaxStreamReceiveWindow:         2 * 1024 * 1024, // 2 MB
-			InitialConnectionReceiveWindow: 1024 * 1024,     // 1 MB
-			MaxConnectionReceiveWindow:     4 * 1024 * 1024, // 4 MB
-			MaxIncomingStreams:             100,
-			MaxIncomingUniStreams:          100,
+			InitialStreamReceiveWindow:     512 * 1024,
+			MaxStreamReceiveWindow:         2 * 1024 * 1024,
+			InitialConnectionReceiveWindow: 1024 * 1024,
+			MaxConnectionReceiveWindow:     4 * 1024 * 1024,
+			MaxIncomingStreams:              100,
+			MaxIncomingUniStreams:           100,
 			EnableDatagrams:                false,
 			DisablePathMTUDiscovery:        false,
 			Allow0RTT:                      false,
 		},
 	}
 
-	// Convert fhttp.Request to net/http.Request
 	stdReq := &stdhttp.Request{
 		Method:           req.Method,
 		URL:              req.URL,
@@ -744,13 +673,11 @@ func (rt *roundTripper) makeHTTP3Request(req *http.Request, conn *HTTP3Connectio
 		Response:         nil,
 	}
 
-	// Use the RoundTripper to make the request
 	stdResp, err := roundTripper.RoundTrip(stdReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert back to fhttp.Response
 	return &http.Response{
 		Status:           stdResp.Status,
 		StatusCode:       stdResp.StatusCode,
