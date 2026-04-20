@@ -204,6 +204,32 @@ func StringToSpec(ja3 string, userAgent string, forceHTTP1 bool) (*utls.ClientHe
 
 	extMap["10"] = &utls.SupportedCurvesExtension{Curves: targetCurves}
 
+	// Rebuild KeyShare to match the curves actually requested.
+	// Chrome sends X25519MLKEM768 + X25519 in key_share when MLKEM is in supported_groups.
+	// utls v1.8.2+ auto-generates the hybrid key material for X25519MLKEM768.
+	hasMLKEM := false
+	for _, c := range targetCurves {
+		if c == utls.X25519MLKEM768 {
+			hasMLKEM = true
+			break
+		}
+	}
+	if hasMLKEM {
+		if keyShareExt, ok := extMap["51"]; ok {
+			if keyShare, ok := keyShareExt.(*utls.KeyShareExtension); ok {
+				newShares := []utls.KeyShare{}
+				for _, ks := range keyShare.KeyShares {
+					if ks.Group == utls.CurveID(utls.GREASE_PLACEHOLDER) {
+						newShares = append(newShares, ks)
+					}
+				}
+				newShares = append(newShares, utls.KeyShare{Group: utls.X25519MLKEM768})
+				newShares = append(newShares, utls.KeyShare{Group: utls.X25519})
+				keyShare.KeyShares = newShares
+			}
+		}
+	}
+
 	// parse point formats
 	var targetPointFormats []byte
 	for _, p := range pointFormats {
