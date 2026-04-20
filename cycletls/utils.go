@@ -944,16 +944,13 @@ func genMap(disableGrease bool) (extMap map[string]utls.TLSExtension) {
 		"13": &utls.SignatureAlgorithmsExtension{
 			SupportedSignatureAlgorithms: []utls.SignatureScheme{
 				utls.ECDSAWithP256AndSHA256,
-				utls.ECDSAWithP384AndSHA384,
-				utls.ECDSAWithP521AndSHA512,
 				utls.PSSWithSHA256,
-				utls.PSSWithSHA384,
-				utls.PSSWithSHA512,
 				utls.PKCS1WithSHA256,
+				utls.ECDSAWithP384AndSHA384,
+				utls.PSSWithSHA384,
 				utls.PKCS1WithSHA384,
+				utls.PSSWithSHA512,
 				utls.PKCS1WithSHA512,
-				utls.ECDSAWithSHA1,
-				utls.PKCS1WithSHA1,
 			},
 		},
 		"16": &utls.ALPNExtension{
@@ -1025,9 +1022,8 @@ func genMap(disableGrease bool) (extMap map[string]utls.TLSExtension) {
 				"h2",
 			},
 		},
-		"17613": &utls.GenericExtension{
-			Id:   17613,
-			Data: []byte{0x00, 0x03, 0x02, 0x68, 0x32},
+		"17613": &utls.ApplicationSettingsExtensionNew{
+			SupportedProtocols: []string{"h2"},
 		},
 		"30032": &utls.GenericExtension{Id: 0x7550, Data: []byte{0}}, // Channel ID extension
 		"65281": &utls.RenegotiationInfoExtension{
