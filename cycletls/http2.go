@@ -100,12 +100,13 @@ func (f *HTTP2Fingerprint) String() string {
 	return fmt.Sprintf("%s|%d|%d|%s", settingsStr, f.StreamDependency, exclusiveFlag, priorityStr)
 }
 
-// Apply configures the HTTP/2 connection with the specified fingerprint
+// Apply configures the HTTP/2 connection with the specified fingerprint.
+// Uses HTTP2Settings (not Transport.Settings) to bypass fhttp's validation
+// that rejects SettingHeaderTableSize and SettingInitialWindowSize from
+// Transport.Settings, routing through AutoWriteFrames() instead.
 func (f *HTTP2Fingerprint) Apply(conn *http2.Transport) {
-	// Set HTTP/2 settings
-	conn.Settings = f.Settings
-
-	// Set priority and weight parameters
-	// Note: Currently dummy implementation as utls/http2 doesn't expose these directly
-	// In a real implementation, this would configure the priority tree
+	conn.HTTP2Settings = &http2.HTTP2Settings{
+		Settings:       f.Settings,
+		ConnectionFlow: int(f.StreamDependency),
+	}
 }

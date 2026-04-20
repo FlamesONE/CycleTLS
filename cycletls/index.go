@@ -1417,6 +1417,7 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 		ForceHTTP1:         options.ForceHTTP1,
 		ForceHTTP3:         options.ForceHTTP3,
 		HeaderOrder:        options.HeaderOrder,
+		TLS13AutoRetry:     options.TLS13AutoRetry,
 	}
 
 	// Create HTTP client with connection reuse
