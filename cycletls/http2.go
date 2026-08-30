@@ -137,18 +137,23 @@ func (f *HTTP2Fingerprint) Apply(conn *http2.Transport) {
 		connectionFlow = f.StreamDependency
 	}
 
-	weight := f.Weight
-	if weight == 0 {
-		weight = 255
-	}
-
 	conn.HTTP2Settings = &http2.HTTP2Settings{
 		Settings:       f.Settings,
 		ConnectionFlow: int(connectionFlow),
-		HeaderPriority: &http2.PriorityParam{
+	}
+
+	// Priority на HEADERS ставим ТОЛЬКО когда отпечаток его реально задал:
+	// современный Chrome его не шлёт, а дефолт weight=255 добавил бы в
+	// Akamai-отпечаток лишний priority-блок — это сигнал для детектора.
+	if f.Weight != 0 || f.StreamDep != 0 || f.Exclusive {
+		weight := f.Weight
+		if weight == 0 {
+			weight = 255
+		}
+		conn.HTTP2Settings.HeaderPriority = &http2.PriorityParam{
 			Exclusive: f.Exclusive,
 			StreamDep: f.StreamDep,
 			Weight:    weight,
-		},
+		}
 	}
 }
